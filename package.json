@@ -1,0 +1,11 @@
+{
+  "name": "simulador-libertad-financiera",
+  "version": "1.0.0",
+  "description": "Simulador de deuda Next-Gen",
+  "scripts": {
+    "start": "npx serve"
+  },
+  "dependencies": {
+    "serve": "^14.2.0"
+  }
+}
