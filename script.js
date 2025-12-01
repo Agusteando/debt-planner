@@ -1,8 +1,10 @@
 /**
- * FREEDOM SIM - LOGIC V8.3 (patched)
- * - Fixed event date handling (quincenas match table correctly)
- * - Fixed cashflow propagation (bolsa carry-over)
- * - Improved payment allocation (extra spreads across debts)
+ * FREEDOM SIM - LOGIC V8.3 (patched + savings goals)
+ * - Fixed chart modal closing (CSS + logic)
+ * - Events/quincenas: safe YYYY-MM-DD handling (no timezone drift)
+ * - Cashflow propagation (bolsa carry-over)
+ * - Extra strategy spreads across debts in order
+ * - NEW: Metas de Ahorro (goals) funded after deudas are paid
  */
 
 // --- DATOS POR DEFECTO ---
@@ -22,6 +24,9 @@ const defaultData = {
         { id: 1, name: 'Didi', balance: 11334.59, rate: 86.5 },
         { id: 2, name: 'Visa 40', balance: 14326.18, rate: 72.0 },
         { id: 3, name: 'Plata', balance: 2500, rate: 99.0 }
+    ],
+    goals: [
+        { id: 1, name: 'Auto', targetAmount: 60000, startingSaved: 0, priority: 1 }
     ],
     events: [
         { id: 1, name: 'Aguinaldo + Qna Full', date: '2025-12-15', amount: 9250, type: 'income' },
@@ -78,6 +83,7 @@ function normalizeState(data) {
     if (!Array.isArray(s.fixedExpenses)) s.fixedExpenses = [];
     if (!Array.isArray(s.debts)) s.debts = [];
     if (!Array.isArray(s.events)) s.events = [];
+    if (!Array.isArray(s.goals)) s.goals = [];
 
     s.grossIncome = parseFloat(s.grossIncome) || 0;
     s.discretionary = parseFloat(s.discretionary) || 0;
@@ -108,6 +114,14 @@ function normalizeState(data) {
         date: ev.date || todayStr,
         amount: parseFloat(ev.amount) || 0,
         type: ev.type === 'expense' ? 'expense' : 'income'
+    }));
+
+    s.goals = s.goals.map((g, idx) => ({
+        id: (g.id !== undefined && g.id !== null) ? g.id : (idx + 1),
+        name: g.name || `Meta ${idx + 1}`,
+        targetAmount: parseFloat(g.targetAmount) || 0,
+        startingSaved: parseFloat(g.startingSaved ?? g.saved ?? 0) || 0,
+        priority: parseInt(g.priority ?? (idx + 1), 10) || (idx + 1)
     }));
 
     if (!s.startDate) s.startDate = todayStr;
@@ -198,6 +212,7 @@ function renderLists() {
     renderSimpleList('deduction', state.deductions);
     renderSimpleList('expense', state.fixedExpenses);
     renderDebts();
+    renderGoals();
     renderEvents();
     renderSummary();
 }
@@ -228,6 +243,34 @@ function renderDebts() {
                     <small style="color:${color}; font-size:0.7em">Tasa ${d.rate}%</small>
                 </div>
                 <span class="mono">${formatMoney(d.balance)}</span>
+            </div>`;
+    });
+}
+
+function renderGoals() {
+    const el = $('goalList');
+    if (!el) return;
+    el.innerHTML = '';
+
+    const sorted = [...state.goals].sort((a, b) => (a.priority || 999) - (b.priority || 999));
+
+    sorted.forEach(g => {
+        const originalIndex = state.goals.findIndex(x => x.id === g.id);
+        if (originalIndex === -1) return;
+        const saved = g.startingSaved || 0;
+        const progress = g.targetAmount > 0
+            ? Math.min(100, Math.round((saved / g.targetAmount) * 100))
+            : 0;
+
+        el.innerHTML += `
+            <div class="list-item" onclick="openModal('goal', ${originalIndex})">
+                <div style="display:flex; flex-direction:column; gap:2px;">
+                    <strong>${g.name}</strong>
+                    <small style="color:var(--text-muted); font-size:0.7rem;">
+                        Objetivo ${formatMoney(g.targetAmount)} · Ahorro inicial ${formatMoney(saved)}${g.priority ? ' · Prio ' + g.priority : ''}
+                    </small>
+                </div>
+                <span class="mono ${progress >= 100 ? 'positive' : ''}">${progress}%</span>
             </div>`;
     });
 }
@@ -275,6 +318,10 @@ function runSimulation() {
     simulationResults = [];
 
     let currentDebts = deepClone(state.debts);
+    let currentGoals = deepClone(state.goals || []).map(g => ({
+        ...g,
+        saved: g.startingSaved || 0
+    }));
 
     const startParts = parseYMD(state.startDate);
     let currentDate = startParts
@@ -290,11 +337,16 @@ function runSimulation() {
     const baseFixed = state.fixedExpenses.reduce((s, x) => s + x.amount, 0);
 
     let debtRemaining = currentDebts.reduce((s, d) => s + d.balance, 0);
+    let totalGoalRemaining = currentGoals.reduce(
+        (s, g) => s + Math.max(0, (g.targetAmount || 0) - (g.saved || 0)),
+        0
+    );
 
-    // NEW: carry-over pocket between periods
+    // carry-over pocket between periods
     let carryOver = 0;
+    let debtFreedomIndex = null;
 
-    while (debtRemaining > 5 && iteration < MAX_ITERS) {
+    while ((debtRemaining > 5 || totalGoalRemaining > 5) && iteration < MAX_ITERS) {
         iteration++;
 
         const cYear = currentDate.getFullYear();
@@ -330,7 +382,7 @@ function runSimulation() {
         });
 
         const netThisPeriod = periodIncome - periodExpense;
-        let cashAvailable = netThisPeriod + carryOver; // incluye bolsa anterior
+        let cashAvailable = netThisPeriod + carryOver; // incluye bolsa de periodos previos
         const initialCash = cashAvailable;
 
         // Interest
@@ -371,7 +423,7 @@ function runSimulation() {
             minDetails.push({ name: p.name, paid: actualPay, required: p.amount });
         });
 
-        // Strategy: use all remaining extra across debts in order
+        // Strategy: use remaining extra across debts in order
         let strategyLog = [];
         let targetName = "";
 
@@ -399,11 +451,51 @@ function runSimulation() {
         currentDebts.forEach(d => { if (d.balance < 1) d.balance = 0; });
         debtRemaining = currentDebts.reduce((s, d) => s + d.balance, 0);
 
+        // MARK DEBT FREEDOM
+        const rowIndexForFreedom = simulationResults.length;
+        if (debtFreedomIndex === null && debtRemaining <= 5) {
+            debtFreedomIndex = rowIndexForFreedom;
+        }
+
+        // Savings goals: only after deudas liquidadas
+        let savingDetails = [];
+        let totalSavingThisPeriod = 0;
+        const canSaveNow = debtRemaining <= 5 && currentGoals.length > 0;
+
+        if (cashAvailable > 1 && canSaveNow) {
+            const orderedGoals = currentGoals
+                .filter(g => (g.targetAmount || 0) - (g.saved || 0) > 1)
+                .sort((a, b) => (a.priority || 999) - (b.priority || 999));
+
+            let extra = cashAvailable;
+            for (const goal of orderedGoals) {
+                if (extra <= 1) break;
+                const need = (goal.targetAmount || 0) - (goal.saved || 0);
+                if (need <= 0) continue;
+                const pay = Math.min(need, extra);
+                goal.saved = (goal.saved || 0) + pay;
+                extra -= pay;
+                totalSavingThisPeriod += pay;
+                savingDetails.push({ name: goal.name, amount: pay });
+            }
+            cashAvailable = extra;
+        }
+
+        totalGoalRemaining = currentGoals.reduce(
+            (s, g) => s + Math.max(0, (g.targetAmount || 0) - (g.saved || 0)),
+            0
+        );
+
         const pocket = Math.max(0, cashAvailable);
-        carryOver = pocket; // NEW: propagate bolsa
+        carryOver = pocket; // propagate bolsa
 
         const resultIndex = simulationResults.length;
         const totalStrategy = strategyLog.reduce((s, x) => s + x.amount, 0);
+
+        const notesParts = [];
+        if (eventLog.length) notesParts.push(eventLog.join(', '));
+        if (savingDetails.length) notesParts.push('Ahorro: ' + savingDetails.map(s => s.name).join(', '));
+        const notes = notesParts.join(' / ');
 
         const rowData = {
             id: iteration,
@@ -413,9 +505,10 @@ function runSimulation() {
             initialCash,
             minDetails,
             strategyDetails: strategyLog,
+            savingDetails,
             endBalance: debtRemaining,
             pocket,
-            notes: eventLog.join(', ')
+            notes
         };
         simulationResults.push(rowData);
 
@@ -451,11 +544,11 @@ function runSimulation() {
     const active = tempD.find(d => d.balance > 0);
     if ($('currentTargetName')) $('currentTargetName').innerText = active ? active.name : "¡Libre!";
 
-    if (debtRemaining < 100 && simulationResults.length > 0) {
-        const last = simulationResults[simulationResults.length - 1];
-        $('freedomDate').innerText = last ? last.dateStr : "Hoy";
+    if (debtFreedomIndex !== null && simulationResults.length > 0) {
+        const row = simulationResults[debtFreedomIndex] || simulationResults[simulationResults.length - 1];
+        $('freedomDate').innerText = row.dateStr;
         $('freedomDate').style.color = 'var(--success)';
-        $('freedomTimeLeft').innerText = `${simulationResults.length} Quincenas`;
+        $('freedomTimeLeft').innerText = `${debtFreedomIndex + 1} Quincenas`;
     } else if (simulationResults.length === 0) {
         $('freedomDate').innerText = "Sin datos";
         $('freedomDate').style.color = 'var(--text-muted)';
@@ -597,14 +690,29 @@ window.openActionPlan = function (index) {
 
     const stratList = $('receiptStrategyList');
     stratList.innerHTML = '';
-    if (data.strategyDetails.length === 0) {
-        stratList.innerHTML = '<div class="receipt-item" style="color:var(--text-muted)">Sin remanente para estrategia.</div>';
+    if (!data.strategyDetails || data.strategyDetails.length === 0) {
+        stratList.innerHTML = '<div class="receipt-item" style="color:var(--text-muted)">Sin remanente para estrategia de deuda.</div>';
     } else {
         data.strategyDetails.forEach(s => {
             stratList.innerHTML += `
                 <div class="receipt-item" style="color:var(--success); font-weight:700">
                     <span>${s.name} (Acelerador)</span>
                     <span>-${formatMoney(s.amount)}</span>
+                </div>
+            `;
+        });
+    }
+
+    const saveList = $('receiptSavingList');
+    saveList.innerHTML = '';
+    if (!data.savingDetails || data.savingDetails.length === 0) {
+        saveList.innerHTML = '<div class="receipt-item" style="color:var(--text-muted)">No hay aportes a metas este periodo.</div>';
+    } else {
+        data.savingDetails.forEach(s => {
+            saveList.innerHTML += `
+                <div class="receipt-item">
+                    <span>${s.name}</span>
+                    <span class="positive">-${formatMoney(s.amount)}</span>
                 </div>
             `;
         });
@@ -630,7 +738,11 @@ function openModal(type, index = null) {
         if (delBtn) { delBtn.style.display = 'block'; delBtn.onclick = () => deleteItem(type, index); }
         let targetArray = type === 'expense'
             ? state.fixedExpenses
-            : (type === 'deduction' ? state.deductions : state[type + 's']);
+            : (type === 'deduction'
+                ? state.deductions
+                : (type === 'goal'
+                    ? state.goals
+                    : state[type + 's']));
         const item = targetArray[index];
         if (item) {
             Array.from(form.elements).forEach(input => {
@@ -662,10 +774,17 @@ function saveItem(type, formData) {
     if (newItem.amount !== undefined) newItem.amount = parseFloat(newItem.amount) || 0;
     if (newItem.balance !== undefined) newItem.balance = parseFloat(newItem.balance) || 0;
     if (newItem.rate !== undefined) newItem.rate = parseFloat(newItem.rate) || 0;
+    if (newItem.targetAmount !== undefined) newItem.targetAmount = parseFloat(newItem.targetAmount) || 0;
+    if (newItem.startingSaved !== undefined) newItem.startingSaved = parseFloat(newItem.startingSaved) || 0;
+    if (newItem.priority !== undefined && newItem.priority !== '') newItem.priority = parseInt(newItem.priority, 10);
 
     let targetArray = type === 'expense'
         ? state.fixedExpenses
-        : (type === 'deduction' ? state.deductions : state[type + 's']);
+        : (type === 'deduction'
+            ? state.deductions
+            : (type === 'goal'
+                ? state.goals
+                : state[type + 's']));
 
     if (type === 'debt') {
         if (editingIndex !== null && targetArray[editingIndex]?.id != null) {
@@ -684,6 +803,17 @@ function saveItem(type, formData) {
         newItem.type = newItem.type === 'expense' ? 'expense' : 'income';
     }
 
+    if (type === 'goal') {
+        if (editingIndex !== null && targetArray[editingIndex]?.id != null) {
+            newItem.id = targetArray[editingIndex].id;
+        } else {
+            newItem.id = Date.now();
+        }
+        if (!newItem.priority || newItem.priority < 1) {
+            newItem.priority = targetArray.length + 1;
+        }
+    }
+
     if (editingIndex !== null && editingIndex >= 0) {
         targetArray[editingIndex] = newItem;
     } else {
@@ -698,7 +828,11 @@ function saveItem(type, formData) {
 function deleteItem(type, index) {
     let targetArray = type === 'expense'
         ? state.fixedExpenses
-        : (type === 'deduction' ? state.deductions : state[type + 's']);
+        : (type === 'deduction'
+            ? state.deductions
+            : (type === 'goal'
+                ? state.goals
+                : state[type + 's']));
     if (index >= 0 && index < targetArray.length) {
         targetArray.splice(index, 1);
     }

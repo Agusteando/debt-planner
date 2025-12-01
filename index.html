@@ -103,6 +103,17 @@
                     <div id="debtList" class="interactive-list"></div>
                 </div>
 
+                <!-- 3b. SAVING GOALS -->
+                <div class="section-card">
+                    <div class="section-header">
+                        <h3>Metas de Ahorro</h3>
+                        <button class="btn-icon" onclick="openModal('goal')">
+                            <span class="material-icons-round">savings</span>
+                        </button>
+                    </div>
+                    <div id="goalList" class="interactive-list"></div>
+                </div>
+
                 <!-- 4. EVENTS -->
                 <div class="section-card">
                     <div class="section-header">
@@ -146,7 +157,7 @@
                     <div class="kpi-card highlight-card">
                         <div class="kpi-icon"><span class="material-icons-round">flag</span></div>
                         <div class="kpi-content">
-                            <span class="kpi-label">Libertad Financiera</span>
+                            <span class="kpi-label">Libertad Financiera (Deuda)</span>
                             <h1 id="freedomDate">---</h1>
                             <span class="kpi-sub" id="freedomTimeLeft">Calculando...</span>
                         </div>
@@ -185,7 +196,7 @@
                 <div class="table-header-info">
                     <div>
                         <h3>Simulación de Pagos</h3>
-                        <small>La fecha es la del periodo (quincena). Los eventos se agrupan por mes y quincena.</small>
+                        <small>La fecha es la del periodo (quincena). Los eventos se agrupan por mes y quincena. Una vez libres de deuda, el excedente se va a tus metas.</small>
                     </div>
                     <button type="button" class="btn-ghost" onclick="openChartModal()">
                         <span class="material-icons-round" style="font-size:16px;">show_chart</span>
@@ -234,7 +245,7 @@
                     </div>
                     <div class="receipt-divider"></div>
                     <div class="receipt-row bold highlight-row">
-                        <span>Dinero para Deuda</span>
+                        <span>Dinero para Deuda / Metas</span>
                         <span id="receiptAvailable" class="mono"></span>
                     </div>
                 </div>
@@ -252,12 +263,19 @@
 
                 <!-- C: Strategy -->
                 <div class="receipt-section">
-                    <h4>2. Estrategia (Excedente)</h4>
-                    <small class="section-desc">El dinero que sobró se va directo al capital del Target.</small>
+                    <h4>2. Estrategia (Excedente a Deuda)</h4>
+                    <small class="section-desc">El dinero que sobró después de mínimos se va directo al capital del Target.</small>
                     <div id="receiptStrategyList" class="receipt-list"></div>
                 </div>
 
-                <!-- D: Footer -->
+                <!-- D: Savings -->
+                <div class="receipt-section">
+                    <h4>3. Ahorro (Metas)</h4>
+                    <small class="section-desc">Una vez liquidadas las deudas, el excedente se dirige a tus metas en orden de prioridad.</small>
+                    <div id="receiptSavingList" class="receipt-list"></div>
+                </div>
+
+                <!-- E: Footer -->
                 <div class="receipt-footer">
                     <div class="receipt-row bold">
                         <span>Deuda Restante Total</span>
@@ -385,6 +403,35 @@
             <div class="modal-footer">
                 <button type="button" class="btn-text" onclick="closeModal('event')">Cancelar</button>
                 <button type="button" class="btn-danger" id="btnDeleteEvent" style="display:none">Eliminar</button>
+                <button type="submit" class="btn-primary">Guardar</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="goalModal" class="editor-modal">
+        <form method="dialog" id="goalForm">
+            <h3>Meta de Ahorro</h3>
+            <div class="input-field">
+                <label>Nombre</label>
+                <input type="text" name="name" required>
+            </div>
+            <div class="row">
+                <div class="input-field">
+                    <label>Monto Objetivo</label>
+                    <input type="number" name="targetAmount" step="0.01" required>
+                </div>
+                <div class="input-field">
+                    <label>Ahorro Inicial</label>
+                    <input type="number" name="startingSaved" step="0.01" value="0">
+                </div>
+            </div>
+            <div class="input-field">
+                <label>Prioridad (1 = primero)</label>
+                <input type="number" name="priority" min="1" step="1">
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn-text" onclick="closeModal('goal')">Cancelar</button>
+                <button type="button" class="btn-danger" id="btnDeleteGoal" style="display:none">Eliminar</button>
                 <button type="submit" class="btn-primary">Guardar</button>
             </div>
         </form>
