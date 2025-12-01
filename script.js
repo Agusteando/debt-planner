@@ -1,10 +1,12 @@
 /**
- * FREEDOM SIM - LOGIC V8.3 (patched + savings goals)
- * - Fixed chart modal closing (CSS + logic)
- * - Events/quincenas: safe YYYY-MM-DD handling (no timezone drift)
- * - Cashflow propagation (bolsa carry-over)
- * - Extra strategy spreads across debts in order
- * - NEW: Metas de Ahorro (goals) funded after deudas are paid
+ * FREEDOM SIM - LOGIC V8.3
+ * - Metas de ahorro
+ * - Chart modal fixed
+ * - Pago mínimo conforme Banxico (Circular 13/2011):
+ *   PagoMin = max(
+ *      1.5% del saldo revolvente al corte + intereses del periodo + IVA,
+ *      1.25% del límite de la línea de crédito
+ *   ), acotado al saldo total.  (Aplicado por quincena en el simulador.)
  */
 
 // --- DATOS POR DEFECTO ---
@@ -21,9 +23,9 @@ const defaultData = {
     discretionary: 300,
     strategy: 'snowball',
     debts: [
-        { id: 1, name: 'Didi', balance: 11334.59, rate: 86.5 },
-        { id: 2, name: 'Visa 40', balance: 14326.18, rate: 72.0 },
-        { id: 3, name: 'Plata', balance: 2500, rate: 99.0 }
+        { id: 1, name: 'Didi',  balance: 11334.59, rate: 86.5, creditLimit: null },
+        { id: 2, name: 'Visa 40', balance: 14326.18, rate: 72.0, creditLimit: null },
+        { id: 3, name: 'Plata', balance: 2500, rate: 99.0, creditLimit: null }
     ],
     goals: [
         { id: 1, name: 'Auto', targetAmount: 60000, startingSaved: 0, priority: 1 }
@@ -103,7 +105,10 @@ function normalizeState(data) {
         id: (d.id !== undefined && d.id !== null) ? d.id : (idx + 1),
         name: d.name || `Deuda ${idx + 1}`,
         balance: parseFloat(d.balance) || 0,
-        rate: parseFloat(d.rate) || 0
+        rate: parseFloat(d.rate) || 0,
+        creditLimit: d.creditLimit !== undefined && d.creditLimit !== null
+            ? (parseFloat(d.creditLimit) || null)
+            : null
     }));
 
     const todayStr = new Date().toISOString().split('T')[0];
@@ -236,11 +241,14 @@ function renderDebts() {
     el.innerHTML = '';
     state.debts.forEach((d, i) => {
         const color = d.rate > 80 ? 'var(--danger)' : (d.rate > 50 ? '#fbbf24' : 'var(--primary)');
+        const limitStr = d.creditLimit ? ` · Límite ${formatMoney(d.creditLimit)}` : '';
         el.innerHTML += `
             <div class="list-item" style="border-left-color:${color}" onclick="openModal('debt', ${i})">
                 <div style="display:flex; flex-direction:column">
                     <strong>${d.name}</strong>
-                    <small style="color:${color}; font-size:0.7em">Tasa ${d.rate}%</small>
+                    <small style="color:${color}; font-size:0.7em">
+                        Tasa ${d.rate}%${limitStr}
+                    </small>
                 </div>
                 <span class="mono">${formatMoney(d.balance)}</span>
             </div>`;
@@ -342,7 +350,6 @@ function runSimulation() {
         0
     );
 
-    // carry-over pocket between periods
     let carryOver = 0;
     let debtFreedomIndex = null;
 
@@ -382,36 +389,79 @@ function runSimulation() {
         });
 
         const netThisPeriod = periodIncome - periodExpense;
-        let cashAvailable = netThisPeriod + carryOver; // incluye bolsa de periodos previos
+        let cashAvailable = netThisPeriod + carryOver;
         const initialCash = cashAvailable;
 
-        // Interest
-        currentDebts.forEach(debt => {
-            if (debt.balance > 0) {
-                const i = (debt.balance * (debt.rate / 100)) / 24;
-                const iva = i * 0.16;
-                const totalCharge = i + iva;
-                debt.balance += totalCharge;
-                totalInterestPaid += totalCharge;
-            }
-        });
-
-        // Minimums
+        // --- INTERESES + MINIMOS (Banxico exacto sobre periodo quincenal) ---
         let minPayments = [];
+
         currentDebts.forEach((debt, idx) => {
-            if (debt.balance < 1) return;
-            let calcMin = (debt.balance * 0.03);
-            if (calcMin < debt.balance && calcMin < 200) calcMin = 200;
-            if (calcMin > debt.balance) calcMin = debt.balance;
-            minPayments.push({ idx, name: debt.name, amount: calcMin });
+            const prevBalance = debt.balance;
+            if (prevBalance <= 0.5) {
+                debt.balance = 0;
+                return;
+            }
+
+            // Interés quincenal (tasa anual nominal / 24) + IVA
+            const intereses = (prevBalance * (debt.rate / 100)) / 24;
+            const iva = intereses * 0.16;
+            const totalCharge = intereses + iva;
+            const balanceAfterCharge = prevBalance + totalCharge;
+
+            // Opción A: 1.5% del saldo revolvente + intereses+IVA
+            const base1p5 = 0.015 * prevBalance;
+            const optionA = base1p5 + totalCharge;
+
+            // Opción B: 1.25% de la línea de crédito (si se capturó)
+            let optionB = 0;
+            if (debt.creditLimit && debt.creditLimit > 0) {
+                optionB = 0.0125 * debt.creditLimit;
+            }
+
+            let baseMin = Math.max(optionA, optionB);
+            let chosen = 'a';
+            if (optionB > optionA && optionB > 0) chosen = 'b';
+
+            // Si el pago mínimo rebasa el saldo total, se cobra el saldo total
+            if (baseMin > balanceAfterCharge) {
+                baseMin = balanceAfterCharge;
+                chosen = 'all';
+            }
+
+            debt.balance = balanceAfterCharge;
+
+            minPayments.push({
+                idx,
+                name: debt.name,
+                amount: baseMin,
+                components: {
+                    prevBalance,
+                    interest: intereses,
+                    iva,
+                    totalCharge,
+                    balanceAfterCharge,
+                    base1p5,
+                    optionA,
+                    optionB,
+                    baseMin,
+                    chosen,
+                    creditLimit: debt.creditLimit || null
+                }
+            });
         });
 
+        // Aplicar mínimos con el cash disponible
         let paidMins = 0;
         let minDetails = [];
 
         minPayments.forEach(p => {
             if (cashAvailable <= 0) {
-                minDetails.push({ name: p.name, paid: 0, required: p.amount });
+                minDetails.push({
+                    name: p.name,
+                    paid: 0,
+                    required: p.amount,
+                    components: p.components
+                });
                 return;
             }
             let actualPay = Math.min(cashAvailable, p.amount);
@@ -420,10 +470,15 @@ function runSimulation() {
             debtObj.balance -= actualPay;
             cashAvailable -= actualPay;
             paidMins += actualPay;
-            minDetails.push({ name: p.name, paid: actualPay, required: p.amount });
+            minDetails.push({
+                name: p.name,
+                paid: actualPay,
+                required: p.amount,
+                components: p.components
+            });
         });
 
-        // Strategy: use remaining extra across debts in order
+        // Strategy: extra contra deudas
         let strategyLog = [];
         let targetName = "";
 
@@ -431,8 +486,8 @@ function runSimulation() {
             const orderedDebts = currentDebts
                 .filter(d => d.balance > 1)
                 .sort(state.strategy === 'snowball'
-                    ? (a, b) => a.balance - b.balance // menor saldo primero
-                    : (a, b) => b.rate - a.rate      // mayor tasa primero
+                    ? (a, b) => a.balance - b.balance
+                    : (a, b) => b.rate - a.rate
                 );
 
             let extra = cashAvailable;
@@ -451,13 +506,13 @@ function runSimulation() {
         currentDebts.forEach(d => { if (d.balance < 1) d.balance = 0; });
         debtRemaining = currentDebts.reduce((s, d) => s + d.balance, 0);
 
-        // MARK DEBT FREEDOM
+        // Marcar quincena donde quedas sin deuda
         const rowIndexForFreedom = simulationResults.length;
         if (debtFreedomIndex === null && debtRemaining <= 5) {
             debtFreedomIndex = rowIndexForFreedom;
         }
 
-        // Savings goals: only after deudas liquidadas
+        // Savings goals: solo después de liquidar deudas
         let savingDetails = [];
         let totalSavingThisPeriod = 0;
         const canSaveNow = debtRemaining <= 5 && currentGoals.length > 0;
@@ -487,7 +542,7 @@ function runSimulation() {
         );
 
         const pocket = Math.max(0, cashAvailable);
-        carryOver = pocket; // propagate bolsa
+        carryOver = pocket;
 
         const resultIndex = simulationResults.length;
         const totalStrategy = strategyLog.reduce((s, x) => s + x.amount, 0);
@@ -520,7 +575,7 @@ function runSimulation() {
             <td class="mono ${rowData.initialCash < 0 ? 'negative' : ''}">${formatMoney(rowData.initialCash)}</td>
             <td class="text-danger">-${formatMoney(paidMins)}</td>
             <td class="positive">${totalStrategy ? '-' + formatMoney(totalStrategy) : '-'}</td>
-            <td><strong>${targetName || (debtRemaining < 10 ? 'LIBRE' : '')}</strong></td>
+            <td><strong>${targetName || (savingDetails.length ? savingDetails.map(s => s.name).join(', ') : (debtRemaining < 10 ? 'LIBRE' : ''))}</strong></td>
             <td class="mono">${formatMoney(debtRemaining)}</td>
             <td style="font-size:0.75rem">${rowData.notes}</td>
         `;
@@ -528,11 +583,9 @@ function runSimulation() {
 
         // Avanzar a la siguiente quincena (fecha de periodo)
         if (isFirstQ) {
-            // Ir al último día del mes actual
-            currentDate = new Date(cYear, cMonth + 1, 0);
+            currentDate = new Date(cYear, cMonth + 1, 0);  // fin de mes
         } else {
-            // Ir al día 15 del siguiente mes
-            currentDate = new Date(cYear, cMonth + 1, 15);
+            currentDate = new Date(cYear, cMonth + 1, 15); // día 15 del siguiente mes
         }
     }
 
@@ -559,7 +612,6 @@ function runSimulation() {
         $('freedomTimeLeft').innerText = "Interés > Pago";
     }
 
-    // Chart only rerenders if modal is opened; but keep last data ready
     if ($('chartModal')?.open) {
         renderChart();
     }
@@ -672,12 +724,12 @@ window.openActionPlan = function (index) {
     minList.innerHTML = '';
     let totalMin = 0;
 
-    if (data.minDetails.length === 0) {
+    if (!data.minDetails || data.minDetails.length === 0) {
         minList.innerHTML = '<div class="receipt-item">No hay pagos mínimos.</div>';
     } else {
         data.minDetails.forEach(m => {
             totalMin += m.paid;
-            const isFull = m.paid >= m.required;
+            const isFull = m.paid >= m.required - 0.01;
             minList.innerHTML += `
                 <div class="receipt-item">
                     <span>${m.name}</span>
@@ -687,6 +739,77 @@ window.openActionPlan = function (index) {
         });
     }
     $('receiptTotalMin').innerText = '-' + formatMoney(totalMin);
+
+    // Desglose detallado de mínimos (para el botón "?")
+    const bd = $('receiptMinBreakdown');
+    if (bd) {
+        let html = '';
+        if (data.minDetails && data.minDetails.length) {
+            data.minDetails.forEach(m => {
+                const c = m.components || {};
+                html += `
+                    <div class="receipt-min-card">
+                        <div class="receipt-row bold">
+                            <span>${m.name}</span>
+                            <span>Min. requerido: ${formatMoney(c.baseMin ?? m.required)}</span>
+                        </div>
+                        <div class="receipt-row">
+                            <span>Saldo revolvente al corte</span>
+                            <span>${formatMoney(c.prevBalance ?? 0)}</span>
+                        </div>
+                        ${c.creditLimit ? `
+                        <div class="receipt-row">
+                            <span>Límite de crédito</span>
+                            <span>${formatMoney(c.creditLimit)}</span>
+                        </div>` : ''}
+                        <div class="receipt-row">
+                            <span>1.5% del saldo (capital)</span>
+                            <span>${formatMoney(c.base1p5 ?? 0)}</span>
+                        </div>
+                        <div class="receipt-row">
+                            <span>Intereses del periodo</span>
+                            <span>${formatMoney(c.interest ?? 0)}</span>
+                        </div>
+                        <div class="receipt-row">
+                            <span>IVA de intereses</span>
+                            <span>${formatMoney(c.iva ?? 0)}</span>
+                        </div>
+                        <div class="receipt-row">
+                            <span>Intereses + IVA</span>
+                            <span>${formatMoney(c.totalCharge ?? 0)}</span>
+                        </div>
+                        <div class="receipt-row">
+                            <span>Opción A (1.5% + intereses+IVA)</span>
+                            <span>${formatMoney(c.optionA ?? 0)}</span>
+                        </div>
+                        ${c.optionB && c.optionB > 0 ? `
+                        <div class="receipt-row">
+                            <span>Opción B (1.25% línea de crédito)</span>
+                            <span>${formatMoney(c.optionB)}</span>
+                        </div>` : ''}
+                        <div class="receipt-row">
+                            <span>Regla aplicada</span>
+                            <span style="text-align:right; max-width:180px;">
+                                ${c.chosen === 'a'
+                                    ? 'Se tomó la opción A (1.5% del saldo + intereses+IVA).'
+                                    : c.chosen === 'b'
+                                        ? 'Se tomó la opción B (1.25% de la línea de crédito).'
+                                        : 'El saldo era menor al pago mínimo, se liquida el saldo completo.'}
+                            </span>
+                        </div>
+                        <div class="receipt-row">
+                            <span>Pagaste en esta quincena</span>
+                            <span>${formatMoney(m.paid)}</span>
+                        </div>
+                    </div>
+                `;
+            });
+        } else {
+            html = '<div class="receipt-item" style="color:var(--text-muted)">No hay desglose disponible.</div>';
+        }
+        bd.innerHTML = html;
+        bd.style.display = 'none';
+    }
 
     const stratList = $('receiptStrategyList');
     stratList.innerHTML = '';
@@ -724,6 +847,13 @@ window.openActionPlan = function (index) {
     const modal = $('actionPlanModal');
     if (modal) modal.showModal();
 };
+
+// toggle del panel de desglose de mínimos
+function toggleMinBreakdown() {
+    const bd = $('receiptMinBreakdown');
+    if (!bd) return;
+    bd.style.display = (bd.style.display === 'none' || !bd.style.display) ? 'block' : 'none';
+}
 
 // MODALS / CRUD
 function openModal(type, index = null) {
@@ -777,6 +907,10 @@ function saveItem(type, formData) {
     if (newItem.targetAmount !== undefined) newItem.targetAmount = parseFloat(newItem.targetAmount) || 0;
     if (newItem.startingSaved !== undefined) newItem.startingSaved = parseFloat(newItem.startingSaved) || 0;
     if (newItem.priority !== undefined && newItem.priority !== '') newItem.priority = parseInt(newItem.priority, 10);
+    if (newItem.creditLimit !== undefined) {
+        const parsed = parseFloat(newItem.creditLimit);
+        newItem.creditLimit = isNaN(parsed) ? null : parsed;
+    }
 
     let targetArray = type === 'expense'
         ? state.fixedExpenses
@@ -923,3 +1057,4 @@ window.deleteCurrentProfile = deleteCurrentProfile;
 window.exportCurrentProfile = exportCurrentProfile;
 window.openChartModal = openChartModal;
 window.closeChartModal = closeChartModal;
+window.toggleMinBreakdown = toggleMinBreakdown;
