@@ -3,54 +3,74 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FreedomSim MX - Ultimate</title>
-    <!-- Fix favicon 404 -->
+    <title>FreedomSim V8.3</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="style.css">
+    <!-- Google Fonts & Material Icons -->
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Chart.js for line chart -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
 
     <div class="app-layout">
         
-        <!-- SIDEBAR -->
+        <!-- SIDEBAR: DATA ENTRY -->
         <aside class="sidebar">
             <div class="brand">
-                <span class="material-icons-round">account_balance</span>
-                <h2>FreedomSim <span style="font-size:0.5em; opacity:0.6">V7</span></h2>
+                <div class="brand-icon">
+                    <span class="material-icons-round">donut_large</span>
+                </div>
+                <div class="brand-text">
+                    <h2>FreedomSim</h2>
+                    <span class="version-tag">V8.3</span>
+                </div>
             </div>
 
             <div class="scrollable-content">
                 
+                <!-- 0. SETTINGS -->
+                <div class="section-group">
+                    <label class="section-label">Configuración</label>
+                    <div class="input-field">
+                        <label>Fecha de Inicio</label>
+                        <div class="input-wrapper">
+                            <span class="material-icons-round input-icon">calendar_today</span>
+                            <input type="date" id="startDate">
+                        </div>
+                    </div>
+                </div>
+
                 <!-- 1. INCOME -->
                 <div class="section-card">
                     <div class="section-header"><h3>Ingresos (Quincenal)</h3></div>
                     <div class="input-field">
-                        <label>Sueldo Bruto Quincenal</label>
+                        <label>Sueldo Bruto</label>
                         <div class="input-wrapper">
                             <span class="currency-symbol">$</span>
-                            <input type="number" id="grossIncome">
+                            <input type="number" id="grossIncome" placeholder="0.00">
                         </div>
                     </div>
 
                     <div class="list-header">
-                        <label>Deducciones (Quincenal)</label>
+                        <label>Deducciones</label>
                         <button class="btn-icon-small" onclick="openModal('deduction')">
                             <span class="material-icons-round">add</span>
                         </button>
                     </div>
                     <div id="deductionList" class="interactive-list"></div>
-                    <div class="total-row">
-                        <span>Neto en Mano (Quincenal)</span>
-                        <span id="netIncomeDisplay" class="highlight-value">$0.00</span>
+                    
+                    <div class="summary-row">
+                        <span>Neto en Mano</span>
+                        <span id="netIncomeDisplay" class="value-highlight">$0.00</span>
                     </div>
                 </div>
 
                 <!-- 2. EXPENSES -->
                 <div class="section-card">
                     <div class="section-header">
-                        <h3>Gastos Operativos (Quincenal)</h3>
+                        <h3>Gastos Fijos</h3>
                         <button class="btn-icon-small" onclick="openModal('expense')">
                             <span class="material-icons-round">add</span>
                         </button>
@@ -58,26 +78,26 @@
                     
                     <div id="expenseList" class="interactive-list"></div>
 
-                    <div class="input-field mt-2">
-                        <label>Discrecional (Austeridad, Quincenal)</label>
+                    <div class="input-field mt-3">
+                        <label>Discrecional / Hormiga</label>
                         <div class="input-wrapper">
                             <span class="currency-symbol">$</span>
-                            <input type="number" id="discretionary">
+                            <input type="number" id="discretionary" placeholder="0.00">
                         </div>
                     </div>
 
-                    <div class="total-row separator-top">
-                        <span>Cashflow Disp. (Quincenal)</span>
-                        <span id="availableForDebt" class="highlight-value positive">$0.00</span>
+                    <div class="summary-row separator-top">
+                        <span>Cashflow Inicial</span>
+                        <span id="availableForDebt" class="value-highlight positive">$0.00</span>
                     </div>
                 </div>
 
                 <!-- 3. DEBTS -->
                 <div class="section-card">
                     <div class="section-header">
-                        <h3>Deudas</h3>
+                        <h3>Cartera de Deudas</h3>
                         <button class="btn-icon" onclick="openModal('debt')">
-                            <span class="material-icons-round">add</span>
+                            <span class="material-icons-round">add_card</span>
                         </button>
                     </div>
                     <div id="debtList" class="interactive-list"></div>
@@ -86,16 +106,16 @@
                 <!-- 4. EVENTS -->
                 <div class="section-card">
                     <div class="section-header">
-                        <h3>Eventos (por Fecha)</h3>
+                        <h3>Eventos Futuros</h3>
                         <button class="btn-icon" onclick="openModal('event')">
-                            <span class="material-icons-round">add</span>
+                            <span class="material-icons-round">event</span>
                         </button>
                     </div>
                     <div id="eventList" class="interactive-list"></div>
                 </div>
                 
                 <button class="btn-secondary full-width" onclick="resetToDefaults()">
-                    Restaurar Defaults del Perfil
+                    Restaurar Defaults
                 </button>
             </div>
         </aside>
@@ -103,106 +123,179 @@
         <!-- MAIN CONTENT -->
         <main class="main-content">
             
-            <!-- HEADER -->
+            <!-- TOOLBAR -->
             <header class="top-bar">
-                <!-- Compact profile toolbar (no extra KPI card) -->
-                <div class="profile-bar">
-                    <div class="profile-bar-left">
-                        <span class="material-icons-round profile-icon">person</span>
-                        <span class="profile-label">Perfil</span>
-                        <div class="profile-select-wrapper">
-                            <select id="profileSelect" class="profile-select"></select>
-                            <span class="material-icons-round select-arrow small-arrow">expand_more</span>
-                        </div>
+                <div class="profile-manager">
+                    <div class="profile-selector">
+                        <span class="material-icons-round">face</span>
+                        <select id="profileSelect"></select>
                     </div>
-                    <div class="profile-bar-right">
-                        <button class="btn-ghost-icon" id="btnNewProfile" title="Nuevo perfil">
-                            <span class="material-icons-round">add</span>
-                        </button>
-                        <button class="btn-ghost-icon" id="btnRenameProfile" title="Renombrar perfil">
-                            <span class="material-icons-round">edit</span>
-                        </button>
-                        <button class="btn-ghost-icon" id="btnDeleteProfile" title="Eliminar perfil">
-                            <span class="material-icons-round">delete</span>
-                        </button>
-                        <span class="profile-separator"></span>
-                        <button class="btn-ghost-icon" id="btnExportProfile" title="Exportar perfil a JSON">
-                            <span class="material-icons-round">file_download</span>
-                        </button>
-                        <button class="btn-ghost-icon" id="btnImportProfile" title="Importar perfil desde JSON">
-                            <span class="material-icons-round">file_upload</span>
-                        </button>
-                        <input type="file" id="profileImportInput" accept="application/json" style="display:none">
+                    <div class="profile-actions">
+                        <button onclick="createNewProfile()" title="Nuevo"><span class="material-icons-round">add</span></button>
+                        <button onclick="renameProfile()" title="Renombrar"><span class="material-icons-round">edit</span></button>
+                        <button onclick="deleteCurrentProfile()" title="Borrar"><span class="material-icons-round">delete</span></button>
+                        <div class="divider"></div>
+                        <button onclick="exportCurrentProfile()" title="Exportar"><span class="material-icons-round">download</span></button>
+                        <button onclick="document.getElementById('profileImportInput').click()" title="Importar"><span class="material-icons-round">upload</span></button>
+                        <input type="file" id="profileImportInput" hidden accept=".json">
                     </div>
                 </div>
 
-                <!-- KPI row -->
-                <div class="metrics-row">
-                    <!-- KPI 1: Freedom Date -->
-                    <div class="metric-card main-metric">
-                        <div class="icon-circle">
-                            <span class="material-icons-round">flight_takeoff</span>
-                        </div>
-                        <div>
-                            <span class="label">Libertad Financiera</span>
-                            <h1 id="freedomDate">...</h1>
-                            <span class="sub-label" id="freedomTimeLeft">Calculando...</span>
+                <div class="dashboard-grid">
+                    <!-- KPI 1 -->
+                    <div class="kpi-card highlight-card">
+                        <div class="kpi-icon"><span class="material-icons-round">flag</span></div>
+                        <div class="kpi-content">
+                            <span class="kpi-label">Libertad Financiera</span>
+                            <h1 id="freedomDate">---</h1>
+                            <span class="kpi-sub" id="freedomTimeLeft">Calculando...</span>
                         </div>
                     </div>
 
-                    <!-- KPI 2: Strategy Control -->
-                    <div class="metric-card control-card">
-                        <span class="label">Estrategia Activa</span>
-                        <div class="select-wrapper">
+                    <!-- KPI 2 -->
+                    <div class="kpi-card control-card">
+                        <span class="kpi-label">Estrategia Activa</span>
+                        <div class="strategy-select">
                             <select id="strategySelect">
-                                <option value="snowball">❄️ Bola de Nieve (Saldo Menor)</option>
-                                <option value="avalanche">🏔️ Avalancha (Interés Mayor)</option>
+                                <option value="snowball">❄️ Bola de Nieve (Menor Saldo)</option>
+                                <option value="avalanche">🏔️ Avalancha (Mayor Tasa)</option>
                             </select>
-                            <span class="material-icons-round select-arrow">expand_more</span>
                         </div>
-                        <div style="margin-top:8px; font-size:0.75rem; color:var(--primary);">
-                            Objetivo: <strong id="currentTargetName">---</strong>
+                        <div class="target-indicator">
+                            Target: <strong id="currentTargetName">---</strong>
                         </div>
                     </div>
 
-                    <!-- KPI 3: Total Debt -->
-                    <div class="metric-card">
-                        <span class="label">Deuda Total Actual (Saldo)</span>
-                        <h2 id="totalDebtStart" style="color: white">...</h2>
+                    <!-- KPI 3 -->
+                    <div class="kpi-card">
+                        <span class="kpi-label">Deuda Total Inicial</span>
+                        <h2 id="totalDebtStart">---</h2>
                     </div>
 
-                    <!-- KPI 4: Interest Cost -->
-                    <div class="metric-card">
-                        <span class="label">Intereses Est. Pagados (Acumulado)</span>
-                        <h2 id="totalInterestPaid" style="color: var(--danger)">...</h2>
+                    <!-- KPI 4 -->
+                    <div class="kpi-card">
+                        <span class="kpi-label">Intereses Totales</span>
+                        <h2 id="totalInterestPaid" class="text-danger">---</h2>
                     </div>
                 </div>
             </header>
 
-            <!-- TABLE -->
-            <div class="table-container">
-                <table id="simTable">
-                    <thead>
-                        <tr>
-                            <th width="5%">#</th>
-                            <th width="12%">Fecha</th>
-                            <th width="12%">Flujo Disp. (Quincenal)</th>
-                            <th width="12%" style="color:var(--danger)">Int+IVA (Quincenal)</th>
-                            <th width="35%">Pagos (Mínimos + Extra)</th>
-                            <th width="12%">Deuda Total</th>
-                            <th width="12%">Notas</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
+            <!-- SIMULATION TABLE -->
+            <div class="table-wrapper">
+                <div class="table-header-info">
+                    <div>
+                        <h3>Simulación de Pagos</h3>
+                        <small>La fecha es la del periodo (quincena). Los eventos se agrupan por mes y quincena.</small>
+                    </div>
+                    <button type="button" class="btn-ghost" onclick="openChartModal()">
+                        <span class="material-icons-round" style="font-size:16px;">show_chart</span>
+                        Ver gráfica
+                    </button>
+                </div>
+                <div class="table-container">
+                    <table id="simTable">
+                        <thead>
+                            <tr>
+                                <th width="5%">#</th>
+                                <th width="12%">Fecha Periodo</th>
+                                <th width="12%">Flujo Disp.</th>
+                                <th width="12%">Mínimos (Todos)</th>
+                                <th width="12%">Estrategia (Extra)</th>
+                                <th width="25%">Target Atacado</th>
+                                <th width="12%">Deuda Restante</th>
+                                <th width="10%">Notas</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
             </div>
         </main>
     </div>
 
-    <!-- MODALS -->
-    <dialog id="debtModal" class="modal">
+    <!-- MODAL: ACTION PLAN (RECEIPT) -->
+    <dialog id="actionPlanModal" class="receipt-modal">
+        <div class="receipt-wrapper">
+            <div class="receipt-header">
+                <h3>🧾 Plan de Acción</h3>
+                <span id="receiptDate" class="receipt-date">---</span>
+            </div>
+            
+            <div class="receipt-body">
+                <!-- A: Money In/Out -->
+                <div class="receipt-section">
+                    <div class="receipt-row">
+                        <span>Ingresos Totales (Neto + Eventos)</span>
+                        <span id="receiptIncome" class="mono positive"></span>
+                    </div>
+                    <div class="receipt-row">
+                        <span>Gastos (Fijos + Eventos)</span>
+                        <span id="receiptExpenses" class="mono negative"></span>
+                    </div>
+                    <div class="receipt-divider"></div>
+                    <div class="receipt-row bold highlight-row">
+                        <span>Dinero para Deuda</span>
+                        <span id="receiptAvailable" class="mono"></span>
+                    </div>
+                </div>
+
+                <!-- B: Minimums -->
+                <div class="receipt-section">
+                    <h4>1. Pagos Obligatorios (Mínimos)</h4>
+                    <small class="section-desc">Se paga el mínimo de TODAS las tarjetas para evitar penalización.</small>
+                    <div id="receiptMinList" class="receipt-list"></div>
+                    <div class="receipt-row subtotal">
+                        <span>Total Mínimos</span>
+                        <span id="receiptTotalMin" class="mono negative"></span>
+                    </div>
+                </div>
+
+                <!-- C: Strategy -->
+                <div class="receipt-section">
+                    <h4>2. Estrategia (Excedente)</h4>
+                    <small class="section-desc">El dinero que sobró se va directo al capital del Target.</small>
+                    <div id="receiptStrategyList" class="receipt-list"></div>
+                </div>
+
+                <!-- D: Footer -->
+                <div class="receipt-footer">
+                    <div class="receipt-row bold">
+                        <span>Deuda Restante Total</span>
+                        <span id="receiptEndBalance" class="mono"></span>
+                    </div>
+                    <div class="receipt-row">
+                        <span>Dinero Sobrante (Bolsa)</span>
+                        <span id="receiptPocket" class="mono"></span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="receipt-actions">
+                <button type="button" class="btn-primary full-width" onclick="document.getElementById('actionPlanModal').close()">Entendido</button>
+            </div>
+        </div>
+    </dialog>
+
+    <!-- MODAL: CHART -->
+    <dialog id="chartModal" class="chart-modal">
+        <div class="chart-modal-header">
+            <h3>Evolución de deuda vs bolsa</h3>
+            <button type="button" class="btn-ghost" onclick="closeChartModal()">
+                <span class="material-icons-round" style="font-size:16px;">close</span>
+                Cerrar
+            </button>
+        </div>
+        <div class="chart-modal-body">
+            <div class="chart-modal-body-inner">
+                <canvas id="simChart"></canvas>
+            </div>
+        </div>
+    </dialog>
+
+    <!-- EDIT MODALS -->
+    <dialog id="debtModal" class="editor-modal">
         <form method="dialog" id="debtForm">
-            <h3 id="debtModalTitle">Deuda</h3>
+            <h3>Editar Deuda</h3>
             <div class="input-field">
                 <label>Nombre</label>
                 <input type="text" name="name" required>
@@ -210,14 +303,14 @@
             <div class="row">
                 <div class="input-field">
                     <label>Saldo</label>
-                    <input type="number" name="balance" required step="0.01">
+                    <input type="number" name="balance" step="0.01" required>
                 </div>
                 <div class="input-field">
-                    <label>Tasa Anual %</label>
-                    <input type="number" name="rate" required step="0.01">
+                    <label>Tasa Anual (%)</label>
+                    <input type="number" name="rate" step="0.01" required>
                 </div>
             </div>
-            <div class="modal-actions">
+            <div class="modal-footer">
                 <button type="button" class="btn-text" onclick="closeModal('debt')">Cancelar</button>
                 <button type="button" class="btn-danger" id="btnDeleteDebt" style="display:none">Eliminar</button>
                 <button type="submit" class="btn-primary">Guardar</button>
@@ -225,18 +318,18 @@
         </form>
     </dialog>
 
-    <dialog id="expenseModal" class="modal">
+    <dialog id="expenseModal" class="editor-modal">
         <form method="dialog" id="expenseForm">
-            <h3 id="expenseModalTitle">Gasto</h3>
+            <h3>Gasto Fijo</h3>
             <div class="input-field">
                 <label>Concepto</label>
                 <input type="text" name="name" required>
             </div>
             <div class="input-field">
-                <label>Monto</label>
-                <input type="number" name="amount" required step="0.01">
+                <label>Monto Quincenal</label>
+                <input type="number" name="amount" step="0.01" required>
             </div>
-            <div class="modal-actions">
+            <div class="modal-footer">
                 <button type="button" class="btn-text" onclick="closeModal('expense')">Cancelar</button>
                 <button type="button" class="btn-danger" id="btnDeleteExpense" style="display:none">Eliminar</button>
                 <button type="submit" class="btn-primary">Guardar</button>
@@ -244,54 +337,54 @@
         </form>
     </dialog>
 
-    <dialog id="eventModal" class="modal">
+    <dialog id="deductionModal" class="editor-modal">
+        <form method="dialog" id="deductionForm">
+            <h3>Deducción de Nómina</h3>
+            <div class="input-field">
+                <label>Concepto</label>
+                <input type="text" name="name" required>
+            </div>
+            <div class="input-field">
+                <label>Monto</label>
+                <input type="number" name="amount" step="0.01" required>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn-text" onclick="closeModal('deduction')">Cancelar</button>
+                <button type="button" class="btn-danger" id="btnDeleteDeduction" style="display:none">Eliminar</button>
+                <button type="submit" class="btn-primary">Guardar</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="eventModal" class="editor-modal">
         <form method="dialog" id="eventForm">
-            <h3 id="eventModalTitle">Evento</h3>
+            <h3>Evento Extraordinario</h3>
             <div class="input-field">
                 <label>Nombre</label>
                 <input type="text" name="name" required>
             </div>
             <div class="input-field">
                 <label>Tipo</label>
-                <div class="toggle-group">
-                    <input type="radio" id="typeInc" name="type" value="income" checked>
-                    <label for="typeInc" class="toggle-btn income">Ingreso</label>
-                    <input type="radio" id="typeExp" name="type" value="expense">
-                    <label for="typeExp" class="toggle-btn expense">Gasto</label>
+                <div class="toggle-switch">
+                    <input type="radio" id="evInc" name="type" value="income" checked>
+                    <label for="evInc">Ingreso (+)</label>
+                    <input type="radio" id="evExp" name="type" value="expense">
+                    <label for="evExp">Gasto (-)</label>
                 </div>
             </div>
             <div class="row">
                 <div class="input-field">
                     <label>Monto</label>
-                    <input type="number" name="amount" required step="0.01">
+                    <input type="number" name="amount" step="0.01" required>
                 </div>
                 <div class="input-field">
                     <label>Fecha</label>
                     <input type="date" name="date" required>
                 </div>
             </div>
-            <div class="modal-actions">
+            <div class="modal-footer">
                 <button type="button" class="btn-text" onclick="closeModal('event')">Cancelar</button>
                 <button type="button" class="btn-danger" id="btnDeleteEvent" style="display:none">Eliminar</button>
-                <button type="submit" class="btn-primary">Guardar</button>
-            </div>
-        </form>
-    </dialog>
-
-    <dialog id="deductionModal" class="modal">
-        <form method="dialog" id="deductionForm">
-            <h3 id="deductionModalTitle">Deducción</h3>
-            <div class="input-field">
-                <label>Nombre</label>
-                <input type="text" name="name" required>
-            </div>
-            <div class="input-field">
-                <label>Monto</label>
-                <input type="number" name="amount" required step="0.01">
-            </div>
-            <div class="modal-actions">
-                <button type="button" class="btn-text" onclick="closeModal('deduction')">Cancelar</button>
-                <button type="button" class="btn-danger" id="btnDeleteDeduction" style="display:none">Eliminar</button>
                 <button type="submit" class="btn-primary">Guardar</button>
             </div>
         </form>

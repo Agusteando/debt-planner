@@ -1,11 +1,11 @@
 /**
- * FREEDOM SIM - LOGIC V7.1
- * - Profile Save / Import / Export
- * - Quincenal labels
- * - Compact profile toolbar above KPIs
+ * FREEDOM SIM - LOGIC V8.3 (patched)
+ * - Fixed event date handling (quincenas match table correctly)
+ * - Fixed cashflow propagation (bolsa carry-over)
+ * - Improved payment allocation (extra spreads across debts)
  */
 
-// --- DATOS INICIALES (TU SITUACIÓN REAL) ---
+// --- DATOS POR DEFECTO ---
 const defaultData = {
     grossIncome: 9250,
     deductions: [
@@ -30,367 +30,187 @@ const defaultData = {
     ]
 };
 
-// --- GESTIÓN DE PERFILES & ESTADO ---
-const STORAGE_KEY_STATE = 'debtSimStateV7'; // legacy / compat
-const STORAGE_KEY_PROFILES = 'freedomSimProfilesV1';
-const STORAGE_KEY_CURRENT_PROFILE = 'freedomSimCurrentProfileId';
+// --- STATE ---
+const STORAGE_KEY_PROFILES = 'freedomSimProfilesV8_3';
+const STORAGE_KEY_CURRENT = 'freedomSimCurrentIdV8_3';
 
 let profiles = [];
 let currentProfileId = null;
 let state = null;
 let editingIndex = null;
+let simulationResults = [];
+let surplusChart = null;
 
-function deepClone(obj) {
-    return JSON.parse(JSON.stringify(obj));
-}
-
-function normalizeImportedState(data) {
-    const clone = deepClone(data || {});
-    if (!Array.isArray(clone.deductions)) clone.deductions = [];
-    if (!Array.isArray(clone.fixedExpenses)) clone.fixedExpenses = [];
-    if (!Array.isArray(clone.debts)) clone.debts = [];
-    if (!Array.isArray(clone.events)) clone.events = [];
-    clone.grossIncome = Number(clone.grossIncome ?? defaultData.grossIncome) || 0;
-    clone.discretionary = Number(clone.discretionary ?? defaultData.discretionary) || 0;
-    clone.strategy = clone.strategy || defaultData.strategy || 'snowball';
-    return clone;
-}
-
-function getSerializableState() {
-    const clone = deepClone(state || {});
-    delete clone.computedNet;
-    delete clone.computedFixed;
-    return clone;
-}
-
-function loadInitialState() {
-    const storedProfilesRaw = localStorage.getItem(STORAGE_KEY_PROFILES);
-    const storedCurrentId = localStorage.getItem(STORAGE_KEY_CURRENT_PROFILE);
-    const legacyStateRaw = localStorage.getItem(STORAGE_KEY_STATE);
-
-    let storedProfiles = null;
-    let legacyState = null;
-
-    try {
-        storedProfiles = storedProfilesRaw ? JSON.parse(storedProfilesRaw) : null;
-    } catch (e) {
-        storedProfiles = null;
-    }
-    try {
-        legacyState = legacyStateRaw ? JSON.parse(legacyStateRaw) : null;
-    } catch (e) {
-        legacyState = null;
-    }
-
-    if (storedProfiles && Array.isArray(storedProfiles) && storedProfiles.length > 0) {
-        profiles = storedProfiles;
-        if (storedCurrentId && profiles.some(p => p.id === storedCurrentId)) {
-            currentProfileId = storedCurrentId;
-        } else {
-            currentProfileId = profiles[0].id;
-        }
-    } else {
-        // No profiles yet: bootstrap from legacy state or defaults
-        const initialState = legacyState && legacyState.debts && Array.isArray(legacyState.debts)
-            ? legacyState
-            : deepClone(defaultData);
-
-        const defaultProfile = {
-            id: 'p_' + Date.now().toString(16),
-            name: 'Perfil 1',
-            data: normalizeImportedState(initialState)
-        };
-        profiles = [defaultProfile];
-        currentProfileId = defaultProfile.id;
-        localStorage.setItem(STORAGE_KEY_PROFILES, JSON.stringify(profiles));
-        localStorage.setItem(STORAGE_KEY_CURRENT_PROFILE, currentProfileId);
-    }
-
-    const currentProfile = profiles.find(p => p.id === currentProfileId) || profiles[0];
-    state = normalizeImportedState(currentProfile.data || defaultData);
-
-    // Mantener compat con almacenamiento legado
-    localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify(getSerializableState()));
-}
-
-function persistProfiles() {
-    if (!profiles || profiles.length === 0) return;
-    const idx = profiles.findIndex(p => p.id === currentProfileId);
-    if (idx !== -1) {
-        profiles[idx].data = getSerializableState();
-    }
-    localStorage.setItem(STORAGE_KEY_PROFILES, JSON.stringify(profiles));
-    localStorage.setItem(STORAGE_KEY_CURRENT_PROFILE, currentProfileId);
-    localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify(getSerializableState()));
-}
-
-// Cargar estado inicial antes de cualquier uso
-loadInitialState();
-
-// --- UTILS ---
+// Utils
 const $ = (id) => document.getElementById(id);
-const formatMoney = (val) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(val);
-const formatDate = (dateStr) => {
-    if (!dateStr) return '';
-    const parts = dateStr.split('-');
-    if (parts.length < 3) return dateStr;
-    return new Date(parts[0], parts[1] - 1, parts[2]).toLocaleDateString('es-MX', { day: 'numeric', month: 'short' });
-};
+const formatMoney = (val) =>
+    new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(val ?? 0);
+const deepClone = (obj) => JSON.parse(JSON.stringify(obj));
 
-// --- GESTIÓN DE PERFILES (UI) ---
+// --- DATE HELPERS (safe for YYYY-MM-DD strings) ---
+function parseYMD(str) {
+    if (!str) return null;
+    const [y, m, d] = str.split('-').map(Number);
+    if (!y || !m || !d) return null;
+    return { year: y, month: m, day: d };
+}
 
-function refreshProfileSelect() {
-    const select = $('profileSelect');
-    if (!select) return;
-    select.innerHTML = '';
+function compareYMD(aStr, bStr) {
+    const a = parseYMD(aStr);
+    const b = parseYMD(bStr);
+    if (!a || !b) return 0;
+    if (a.year !== b.year) return a.year - b.year;
+    if (a.month !== b.month) return a.month - b.month;
+    return a.day - b.day;
+}
+
+function dateFromYMD(str) {
+    const p = parseYMD(str);
+    if (!p) return new Date();
+    return new Date(p.year, p.month - 1, p.day);
+}
+
+// Normalization
+function normalizeState(data) {
+    const s = deepClone(data || {});
+
+    if (!Array.isArray(s.deductions)) s.deductions = [];
+    if (!Array.isArray(s.fixedExpenses)) s.fixedExpenses = [];
+    if (!Array.isArray(s.debts)) s.debts = [];
+    if (!Array.isArray(s.events)) s.events = [];
+
+    s.grossIncome = parseFloat(s.grossIncome) || 0;
+    s.discretionary = parseFloat(s.discretionary) || 0;
+    s.strategy = s.strategy || 'snowball';
+
+    s.deductions = s.deductions.map(d => ({
+        name: d.name || '',
+        amount: parseFloat(d.amount) || 0
+    }));
+
+    s.fixedExpenses = s.fixedExpenses.map(e => ({
+        name: e.name || '',
+        amount: parseFloat(e.amount) || 0
+    }));
+
+    s.debts = s.debts.map((d, idx) => ({
+        id: (d.id !== undefined && d.id !== null) ? d.id : (idx + 1),
+        name: d.name || `Deuda ${idx + 1}`,
+        balance: parseFloat(d.balance) || 0,
+        rate: parseFloat(d.rate) || 0
+    }));
+
+    const todayStr = new Date().toISOString().split('T')[0];
+
+    s.events = s.events.map((ev, idx) => ({
+        id: (ev.id !== undefined && ev.id !== null) ? ev.id : (idx + 1),
+        name: ev.name || `Evento ${idx + 1}`,
+        date: ev.date || todayStr,
+        amount: parseFloat(ev.amount) || 0,
+        type: ev.type === 'expense' ? 'expense' : 'income'
+    }));
+
+    if (!s.startDate) s.startDate = todayStr;
+
+    return s;
+}
+
+// Load / Save
+function loadApp() {
+    const rawProfiles = localStorage.getItem(STORAGE_KEY_PROFILES);
+    const rawCurrentId = localStorage.getItem(STORAGE_KEY_CURRENT);
+
+    if (rawProfiles) {
+        try {
+            profiles = JSON.parse(rawProfiles);
+            currentProfileId = rawCurrentId || profiles[0].id;
+        } catch (e) {
+            console.error("Error parsing storage", e);
+            profiles = [];
+        }
+    }
+
+    if (!profiles || profiles.length === 0) {
+        const newId = 'p_' + Date.now();
+        profiles = [{ id: newId, name: 'Plan Personal', data: normalizeState(defaultData) }];
+        currentProfileId = newId;
+    }
+
+    if (!profiles.find(p => p.id === currentProfileId)) currentProfileId = profiles[0].id;
+
+    const p = profiles.find(p => p.id === currentProfileId);
+    state = normalizeState(p.data);
+
+    saveAll();
+    initUI();
+}
+
+function saveAll() {
+    const idx = profiles.findIndex(p => p.id === currentProfileId);
+    if (idx >= 0) profiles[idx].data = deepClone(state);
+    localStorage.setItem(STORAGE_KEY_PROFILES, JSON.stringify(profiles));
+    localStorage.setItem(STORAGE_KEY_CURRENT, currentProfileId);
+}
+
+// UI INIT
+function initUI() {
+    const sel = $('profileSelect');
+    sel.innerHTML = '';
     profiles.forEach(p => {
         const opt = document.createElement('option');
         opt.value = p.id;
         opt.textContent = p.name;
-        select.appendChild(opt);
+        sel.appendChild(opt);
     });
-    select.value = currentProfileId;
-}
+    sel.value = currentProfileId;
+    sel.onchange = (e) => switchProfile(e.target.value);
 
-function switchProfile(id) {
-    const target = profiles.find(p => p.id === id);
-    if (!target) return;
-    currentProfileId = id;
-    state = normalizeImportedState(target.data || defaultData);
-
-    persistProfiles();
-
-    $('grossIncome').value = state.grossIncome || 0;
-    $('discretionary').value = state.discretionary || 0;
-    $('strategySelect').value = state.strategy || 'snowball';
-
-    renderAll();
-    runSimulation();
-}
-
-function createNewProfile() {
-    let name = prompt('Nombre del nuevo perfil:', `Perfil ${profiles.length + 1}`);
-    if (!name) name = `Perfil ${profiles.length + 1}`;
-    const newProfile = {
-        id: 'p_' + Date.now().toString(16) + '_' + Math.random().toString(16).slice(2),
-        name,
-        data: getSerializableState()
-    };
-    profiles.push(newProfile);
-    currentProfileId = newProfile.id;
-    persistProfiles();
-    refreshProfileSelect();
-}
-
-function renameProfile() {
-    const current = profiles.find(p => p.id === currentProfileId);
-    if (!current) return;
-    const newName = prompt('Nuevo nombre del perfil:', current.name);
-    if (!newName) return;
-    current.name = newName;
-    persistProfiles();
-    refreshProfileSelect();
-}
-
-function deleteCurrentProfile() {
-    if (!profiles || profiles.length <= 1) {
-        alert('Debes conservar al menos un perfil.');
-        return;
-    }
-    const current = profiles.find(p => p.id === currentProfileId);
-    if (!current) return;
-    if (!confirm(`¿Eliminar el perfil "${current.name}"?`)) return;
-
-    profiles = profiles.filter(p => p.id !== currentProfileId);
-    currentProfileId = profiles[0].id;
-    state = normalizeImportedState(profiles[0].data || defaultData);
-    persistProfiles();
-    refreshProfileSelect();
-
-    $('grossIncome').value = state.grossIncome || 0;
-    $('discretionary').value = state.discretionary || 0;
-    $('strategySelect').value = state.strategy || 'snowball';
-
-    renderAll();
-    runSimulation();
-}
-
-function exportCurrentProfile() {
-    const current = profiles.find(p => p.id === currentProfileId);
-    if (!current) return;
-
-    const payload = {
-        meta: {
-            app: 'FreedomSimMX',
-            version: '1',
-            exportedAt: new Date().toISOString()
-        },
-        profile: {
-            name: current.name,
-            data: getSerializableState()
-        }
-    };
-
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    const safeName = (current.name || 'perfil').replace(/[^\w\-]+/g, '_');
-    a.href = url;
-    a.download = `freedomSim_${safeName}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-}
-
-function handleImportFile(event) {
-    const input = event.target;
-    const file = input.files && input.files[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-        try {
-            const text = e.target.result;
-            const json = JSON.parse(text);
-
-            let importedName = 'Perfil Importado';
-            let importedData = null;
-
-            if (json && json.profile && json.profile.data) {
-                importedName = json.profile.name || importedName;
-                importedData = json.profile.data;
-            } else if (json && (json.grossIncome !== undefined || json.debts)) {
-                importedData = json;
-                if (json.profileName) importedName = json.profileName;
-            }
-
-            if (!importedData) {
-                alert('El archivo no parece ser un perfil válido de FreedomSim.');
-                return;
-            }
-
-            importedData = normalizeImportedState(importedData);
-
-            const newProfile = {
-                id: 'p_' + Date.now().toString(16) + '_' + Math.random().toString(16).slice(2),
-                name: importedName,
-                data: importedData
-            };
-
-            profiles.push(newProfile);
-            currentProfileId = newProfile.id;
-            state = deepClone(importedData);
-
-            persistProfiles();
-            refreshProfileSelect();
-
-            $('grossIncome').value = state.grossIncome || 0;
-            $('discretionary').value = state.discretionary || 0;
-            $('strategySelect').value = state.strategy || 'snowball';
-
-            renderAll();
-            runSimulation();
-        } catch (err) {
-            console.error(err);
-            alert('No se pudo leer el archivo de perfil.');
-        } finally {
-            input.value = '';
-        }
-    };
-    reader.readAsText(file);
-}
-
-function setupProfileUI() {
-    const select = $('profileSelect');
-    if (select) {
-        refreshProfileSelect();
-        select.addEventListener('change', (e) => switchProfile(e.target.value));
-    }
-
-    const btnNew = $('btnNewProfile');
-    if (btnNew) btnNew.addEventListener('click', createNewProfile);
-
-    const btnRen = $('btnRenameProfile');
-    if (btnRen) btnRen.addEventListener('click', renameProfile);
-
-    const btnDel = $('btnDeleteProfile');
-    if (btnDel) btnDel.addEventListener('click', deleteCurrentProfile);
-
-    const btnExport = $('btnExportProfile');
-    if (btnExport) btnExport.addEventListener('click', exportCurrentProfile);
-
-    const btnImport = $('btnImportProfile');
-    const importInput = $('profileImportInput');
-    if (btnImport && importInput) {
-        btnImport.addEventListener('click', () => importInput.click());
-        importInput.addEventListener('change', handleImportFile);
-    }
-}
-
-// --- INICIALIZACIÓN ---
-function init() {
+    $('startDate').value = state.startDate;
     $('grossIncome').value = state.grossIncome;
     $('discretionary').value = state.discretionary;
     $('strategySelect').value = state.strategy;
 
-    attachListeners();
-    setupProfileUI();
+    $('startDate').onchange = (e) => { state.startDate = e.target.value; saveAndRun(); };
+    $('grossIncome').oninput = (e) => { state.grossIncome = parseFloat(e.target.value) || 0; saveAndRun(); };
+    $('discretionary').oninput = (e) => { state.discretionary = parseFloat(e.target.value) || 0; saveAndRun(); };
+    $('strategySelect').onchange = (e) => { state.strategy = e.target.value; saveAndRun(); };
 
-    renderAll();
+    renderLists();
     runSimulation();
 }
 
-function attachListeners() {
-    // Inputs simples
-    const inputs = ['grossIncome', 'discretionary'];
-    inputs.forEach(id => {
-        const el = $(id);
-        if (el) {
-            el.addEventListener('input', (e) => {
-                state[id] = parseFloat(e.target.value) || 0;
-                saveState();
-            });
-        }
-    });
-
-    // Select Estrategia
-    const strat = $('strategySelect');
-    if (strat) {
-        strat.addEventListener('change', (e) => {
-            state.strategy = e.target.value;
-            saveState();
-        });
-    }
+function switchProfile(id) {
+    currentProfileId = id;
+    const p = profiles.find(x => x.id === id);
+    state = normalizeState(p.data);
+    saveAll();
+    initUI();
 }
 
-function saveState() {
-    persistProfiles();
-    updateSummary();
+function saveAndRun() {
+    saveAll();
+    renderSummary();
     runSimulation();
 }
 
-// --- RENDERIZADO DOM ---
-
-function renderAll() {
-    renderList('deduction', state.deductions);
-    renderList('expense', state.fixedExpenses);
+// RENDER HELPERS
+function renderLists() {
+    renderSimpleList('deduction', state.deductions);
+    renderSimpleList('expense', state.fixedExpenses);
     renderDebts();
     renderEvents();
-    updateSummary();
+    renderSummary();
 }
 
-function renderList(type, list) {
-    const listId = type === 'expense' ? 'expenseList' : 'deductionList';
-    const el = $(listId);
+function renderSimpleList(type, list) {
+    const el = $(type + 'List');
     if (!el) return;
     el.innerHTML = '';
-    
     list.forEach((item, i) => {
         el.innerHTML += `
             <div class="list-item" onclick="openModal('${type}', ${i})">
-                <div class="list-item-content"><strong>${item.name}</strong></div>
-                <div class="negative">-${formatMoney(item.amount)}</div>
+                <span>${item.name}</span>
+                <span class="negative">-${formatMoney(item.amount)}</span>
             </div>`;
     });
 }
@@ -399,16 +219,15 @@ function renderDebts() {
     const el = $('debtList');
     if (!el) return;
     el.innerHTML = '';
-    
     state.debts.forEach((d, i) => {
-        let color = d.rate > 80 ? '#ef4444' : (d.rate > 50 ? '#f59e0b' : '#3b82f6');
+        const color = d.rate > 80 ? 'var(--danger)' : (d.rate > 50 ? '#fbbf24' : 'var(--primary)');
         el.innerHTML += `
-            <div class="list-item" style="border-left-color: ${color}" onclick="openModal('debt', ${i})">
-                <div class="list-item-content">
+            <div class="list-item" style="border-left-color:${color}" onclick="openModal('debt', ${i})">
+                <div style="display:flex; flex-direction:column">
                     <strong>${d.name}</strong>
-                    <small style="color:${color}">Tasa ${d.rate}%</small>
+                    <small style="color:${color}; font-size:0.7em">Tasa ${d.rate}%</small>
                 </div>
-                <div class="mono">${formatMoney(d.balance)}</div>
+                <span class="mono">${formatMoney(d.balance)}</span>
             </div>`;
     });
 }
@@ -417,72 +236,416 @@ function renderEvents() {
     const el = $('eventList');
     if (!el) return;
     el.innerHTML = '';
-    state.events.sort((a, b) => new Date(a.date) - new Date(b.date));
-    
-    state.events.forEach((e, i) => {
-        const isInc = e.type === 'income';
+
+    const sorted = [...state.events].sort((a, b) => compareYMD(a.date, b.date));
+
+    sorted.forEach(ev => {
+        const isInc = ev.type === 'income';
+        const originalIndex = state.events.findIndex(e => e.id === ev.id);
+        if (originalIndex === -1) return;
         el.innerHTML += `
-            <div class="list-item" style="border-left-color: ${isInc ? 'var(--success)' : 'var(--danger)'}" onclick="openModal('event', ${i})">
-                <div class="list-item-content">
-                    <strong>${e.name}</strong>
-                    <small>${formatDate(e.date)}</small>
+            <div class="list-item" style="border-left-color: ${isInc ? 'var(--success)' : 'var(--danger)'}" onclick="openModal('event', ${originalIndex})">
+                <div style="display:flex; flex-direction:column">
+                    <strong>${ev.name}</strong>
+                    <small style="color:var(--text-muted)">${formatDateShort(ev.date)}</small>
                 </div>
-                <div class="${isInc ? 'positive' : 'negative'}">
-                    ${isInc ? '+' : '-'}${formatMoney(e.amount)}
-                </div>
+                <span class="${isInc ? 'positive' : 'negative'}">${isInc ? '+' : '-'}${formatMoney(ev.amount)}</span>
             </div>`;
     });
 }
 
-function updateSummary() {
-    const totalDeductions = state.deductions.reduce((sum, d) => sum + (parseFloat(d.amount) || 0), 0);
-    const net = state.grossIncome - totalDeductions;
-    const totalFixed = state.fixedExpenses.reduce((sum, e) => sum + (parseFloat(e.amount) || 0), 0);
-    const available = net - totalFixed - state.discretionary;
+function renderSummary() {
+    const totalDed = state.deductions.reduce((s, x) => s + (x.amount || 0), 0);
+    const net = state.grossIncome - totalDed;
+    const totalFix = state.fixedExpenses.reduce((s, x) => s + (x.amount || 0), 0);
+    const avail = net - totalFix - state.discretionary;
 
-    $('netIncomeDisplay').innerText = formatMoney(net);
-    const availEl = $('availableForDebt');
-    availEl.innerText = formatMoney(available);
-    availEl.className = `highlight-value ${available >= 0 ? 'positive' : 'negative'}`;
+    if ($('netIncomeDisplay')) $('netIncomeDisplay').innerText = formatMoney(net);
+    if ($('availableForDebt')) $('availableForDebt').innerText = formatMoney(avail);
 
-    const currentTotalDebt = state.debts.reduce((sum, d) => sum + (parseFloat(d.balance) || 0), 0);
-    $('totalDebtStart').innerText = formatMoney(currentTotalDebt);
-
-    state.computedNet = net;
-    state.computedFixed = totalFixed;
+    const debtSum = state.debts.reduce((s, d) => s + (d.balance || 0), 0);
+    if ($('totalDebtStart')) $('totalDebtStart').innerText = formatMoney(debtSum);
 }
 
-// --- SISTEMA DE MODALES ---
+// SIM ENGINE
+function runSimulation() {
+    const tbody = $('simTable')?.querySelector('tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    simulationResults = [];
 
+    let currentDebts = deepClone(state.debts);
+
+    const startParts = parseYMD(state.startDate);
+    let currentDate = startParts
+        ? new Date(startParts.year, startParts.month - 1, startParts.day)
+        : new Date();
+
+    let iteration = 0;
+    const MAX_ITERS = 120;
+    let totalInterestPaid = 0;
+
+    const totalDed = state.deductions.reduce((s, x) => s + x.amount, 0);
+    const baseNet = state.grossIncome - totalDed;
+    const baseFixed = state.fixedExpenses.reduce((s, x) => s + x.amount, 0);
+
+    let debtRemaining = currentDebts.reduce((s, d) => s + d.balance, 0);
+
+    // NEW: carry-over pocket between periods
+    let carryOver = 0;
+
+    while (debtRemaining > 5 && iteration < MAX_ITERS) {
+        iteration++;
+
+        const cYear = currentDate.getFullYear();
+        const cMonth = currentDate.getMonth();
+        const cDay = currentDate.getDate();
+        const isFirstQ = cDay <= 15;
+
+        let periodIncome = baseNet;
+        let periodExpense = baseFixed + state.discretionary;
+        let eventLog = [];
+
+        // Events by month + quincena
+        state.events.forEach(ev => {
+            if (!ev.date) return;
+            const p = parseYMD(ev.date);
+            if (!p) return;
+            const evYear = p.year;
+            const evMonth = p.month - 1;
+            const evDay = p.day;
+
+            if (evYear === cYear && evMonth === cMonth) {
+                const evIsFirst = evDay <= 15;
+                if (evIsFirst === isFirstQ) {
+                    if (ev.type === 'income') {
+                        periodIncome += ev.amount;
+                        eventLog.push(`+${ev.name}`);
+                    } else {
+                        periodExpense += ev.amount;
+                        eventLog.push(`-${ev.name}`);
+                    }
+                }
+            }
+        });
+
+        const netThisPeriod = periodIncome - periodExpense;
+        let cashAvailable = netThisPeriod + carryOver; // incluye bolsa anterior
+        const initialCash = cashAvailable;
+
+        // Interest
+        currentDebts.forEach(debt => {
+            if (debt.balance > 0) {
+                const i = (debt.balance * (debt.rate / 100)) / 24;
+                const iva = i * 0.16;
+                const totalCharge = i + iva;
+                debt.balance += totalCharge;
+                totalInterestPaid += totalCharge;
+            }
+        });
+
+        // Minimums
+        let minPayments = [];
+        currentDebts.forEach((debt, idx) => {
+            if (debt.balance < 1) return;
+            let calcMin = (debt.balance * 0.03);
+            if (calcMin < debt.balance && calcMin < 200) calcMin = 200;
+            if (calcMin > debt.balance) calcMin = debt.balance;
+            minPayments.push({ idx, name: debt.name, amount: calcMin });
+        });
+
+        let paidMins = 0;
+        let minDetails = [];
+
+        minPayments.forEach(p => {
+            if (cashAvailable <= 0) {
+                minDetails.push({ name: p.name, paid: 0, required: p.amount });
+                return;
+            }
+            let actualPay = Math.min(cashAvailable, p.amount);
+            const debtObj = currentDebts[p.idx];
+            if (!debtObj) return;
+            debtObj.balance -= actualPay;
+            cashAvailable -= actualPay;
+            paidMins += actualPay;
+            minDetails.push({ name: p.name, paid: actualPay, required: p.amount });
+        });
+
+        // Strategy: use all remaining extra across debts in order
+        let strategyLog = [];
+        let targetName = "";
+
+        if (cashAvailable > 1) {
+            const orderedDebts = currentDebts
+                .filter(d => d.balance > 1)
+                .sort(state.strategy === 'snowball'
+                    ? (a, b) => a.balance - b.balance // menor saldo primero
+                    : (a, b) => b.rate - a.rate      // mayor tasa primero
+                );
+
+            let extra = cashAvailable;
+            for (const debt of orderedDebts) {
+                if (extra <= 1) break;
+                const payAmount = Math.min(debt.balance, extra);
+                if (payAmount <= 0) continue;
+                debt.balance -= payAmount;
+                extra -= payAmount;
+                strategyLog.push({ name: debt.name, amount: payAmount });
+                if (!targetName) targetName = debt.name;
+            }
+            cashAvailable = extra;
+        }
+
+        currentDebts.forEach(d => { if (d.balance < 1) d.balance = 0; });
+        debtRemaining = currentDebts.reduce((s, d) => s + d.balance, 0);
+
+        const pocket = Math.max(0, cashAvailable);
+        carryOver = pocket; // NEW: propagate bolsa
+
+        const resultIndex = simulationResults.length;
+        const totalStrategy = strategyLog.reduce((s, x) => s + x.amount, 0);
+
+        const rowData = {
+            id: iteration,
+            dateStr: formatDateShort(currentDate),
+            income: periodIncome,
+            expenses: periodExpense,
+            initialCash,
+            minDetails,
+            strategyDetails: strategyLog,
+            endBalance: debtRemaining,
+            pocket,
+            notes: eventLog.join(', ')
+        };
+        simulationResults.push(rowData);
+
+        const tr = document.createElement('tr');
+        tr.onclick = function () { openActionPlan(resultIndex); };
+        tr.innerHTML = `
+            <td>${iteration}</td>
+            <td>${rowData.dateStr}</td>
+            <td class="mono ${rowData.initialCash < 0 ? 'negative' : ''}">${formatMoney(rowData.initialCash)}</td>
+            <td class="text-danger">-${formatMoney(paidMins)}</td>
+            <td class="positive">${totalStrategy ? '-' + formatMoney(totalStrategy) : '-'}</td>
+            <td><strong>${targetName || (debtRemaining < 10 ? 'LIBRE' : '')}</strong></td>
+            <td class="mono">${formatMoney(debtRemaining)}</td>
+            <td style="font-size:0.75rem">${rowData.notes}</td>
+        `;
+        tbody.appendChild(tr);
+
+        // Avanzar a la siguiente quincena (fecha de periodo)
+        if (isFirstQ) {
+            // Ir al último día del mes actual
+            currentDate = new Date(cYear, cMonth + 1, 0);
+        } else {
+            // Ir al día 15 del siguiente mes
+            currentDate = new Date(cYear, cMonth + 1, 15);
+        }
+    }
+
+    if ($('totalInterestPaid')) $('totalInterestPaid').innerText = formatMoney(totalInterestPaid);
+
+    let tempD = deepClone(state.debts);
+    if (state.strategy === 'snowball') tempD.sort((a, b) => a.balance - b.balance);
+    else tempD.sort((a, b) => b.rate - a.rate);
+    const active = tempD.find(d => d.balance > 0);
+    if ($('currentTargetName')) $('currentTargetName').innerText = active ? active.name : "¡Libre!";
+
+    if (debtRemaining < 100 && simulationResults.length > 0) {
+        const last = simulationResults[simulationResults.length - 1];
+        $('freedomDate').innerText = last ? last.dateStr : "Hoy";
+        $('freedomDate').style.color = 'var(--success)';
+        $('freedomTimeLeft').innerText = `${simulationResults.length} Quincenas`;
+    } else if (simulationResults.length === 0) {
+        $('freedomDate').innerText = "Sin datos";
+        $('freedomDate').style.color = 'var(--text-muted)';
+        $('freedomTimeLeft').innerText = "—";
+    } else {
+        $('freedomDate').innerText = "Nunca";
+        $('freedomDate').style.color = 'var(--danger)';
+        $('freedomTimeLeft').innerText = "Interés > Pago";
+    }
+
+    // Chart only rerenders if modal is opened; but keep last data ready
+    if ($('chartModal')?.open) {
+        renderChart();
+    }
+}
+
+// CHART MODAL
+function openChartModal() {
+    const modal = $('chartModal');
+    if (!modal) return;
+    modal.showModal();
+    renderChart();
+}
+
+function closeChartModal() {
+    const modal = $('chartModal');
+    if (!modal) return;
+    modal.close();
+}
+
+function renderChart() {
+    const canvas = $('simChart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+
+    const labels = simulationResults.map(r => r.dateStr);
+    const debtData = simulationResults.map(r => r.endBalance);
+    const pocketData = simulationResults.map(r => r.pocket);
+
+    if (surplusChart) surplusChart.destroy();
+
+    surplusChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels,
+            datasets: [
+                {
+                    label: 'Deuda restante',
+                    data: debtData,
+                    borderColor: '#f87171',
+                    backgroundColor: 'rgba(248,113,113,0.12)',
+                    tension: 0.25,
+                    borderWidth: 2,
+                    pointRadius: 0
+                },
+                {
+                    label: 'Bolsa (sobrante)',
+                    data: pocketData,
+                    borderColor: '#4ade80',
+                    backgroundColor: 'rgba(74,222,128,0.12)',
+                    tension: 0.25,
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    yAxisID: 'y1'
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { display: true, labels: { color: '#e5e7eb', font: { size: 11 } } },
+                tooltip: {
+                    callbacks: {
+                        label: ctx => `${ctx.dataset.label}: ${formatMoney(ctx.parsed.y)}`
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    ticks: { color: '#9ca3af', maxRotation: 0, autoSkip: true },
+                    grid: { color: 'rgba(148,163,184,0.15)' }
+                },
+                y: {
+                    type: 'linear',
+                    position: 'left',
+                    title: { display: true, text: 'Deuda', color: '#e5e7eb', font: { size: 11 } },
+                    ticks: {
+                        color: '#9ca3af',
+                        callback: v => formatMoney(v)
+                    },
+                    grid: { color: 'rgba(148,163,184,0.1)' }
+                },
+                y1: {
+                    type: 'linear',
+                    position: 'right',
+                    title: { display: true, text: 'Bolsa', color: '#e5e7eb', font: { size: 11 } },
+                    ticks: {
+                        color: '#9ca3af',
+                        callback: v => formatMoney(v)
+                    },
+                    grid: { drawOnChartArea: false }
+                }
+            }
+        }
+    });
+}
+
+// RECEIPT MODAL
+window.openActionPlan = function (index) {
+    const data = simulationResults[index];
+    if (!data) return;
+
+    $('receiptDate').innerText = data.dateStr;
+    $('receiptIncome').innerText = formatMoney(data.income);
+    $('receiptExpenses').innerText = '-' + formatMoney(data.expenses);
+    $('receiptAvailable').innerText = formatMoney(data.initialCash);
+
+    const minList = $('receiptMinList');
+    minList.innerHTML = '';
+    let totalMin = 0;
+
+    if (data.minDetails.length === 0) {
+        minList.innerHTML = '<div class="receipt-item">No hay pagos mínimos.</div>';
+    } else {
+        data.minDetails.forEach(m => {
+            totalMin += m.paid;
+            const isFull = m.paid >= m.required;
+            minList.innerHTML += `
+                <div class="receipt-item">
+                    <span>${m.name}</span>
+                    <span class="${isFull ? '' : 'negative'}">-${formatMoney(m.paid)}</span>
+                </div>
+            `;
+        });
+    }
+    $('receiptTotalMin').innerText = '-' + formatMoney(totalMin);
+
+    const stratList = $('receiptStrategyList');
+    stratList.innerHTML = '';
+    if (data.strategyDetails.length === 0) {
+        stratList.innerHTML = '<div class="receipt-item" style="color:var(--text-muted)">Sin remanente para estrategia.</div>';
+    } else {
+        data.strategyDetails.forEach(s => {
+            stratList.innerHTML += `
+                <div class="receipt-item" style="color:var(--success); font-weight:700">
+                    <span>${s.name} (Acelerador)</span>
+                    <span>-${formatMoney(s.amount)}</span>
+                </div>
+            `;
+        });
+    }
+
+    $('receiptEndBalance').innerText = formatMoney(data.endBalance);
+    $('receiptPocket').innerText = formatMoney(data.pocket);
+
+    const modal = $('actionPlanModal');
+    if (modal) modal.showModal();
+};
+
+// MODALS / CRUD
 function openModal(type, index = null) {
     editingIndex = index;
     const modal = $(`${type}Modal`);
     const form = $(`${type}Form`);
-    const deleteBtn = $(`btnDelete${type.charAt(0).toUpperCase() + type.slice(1)}`);
-    
-    if (!modal || !form) return;
+    const delBtn = $(`btnDelete${capitalize(type)}`);
+
     form.reset();
 
-    if (index !== null) {
-        if (deleteBtn) {
-            deleteBtn.style.display = 'block';
-            deleteBtn.onclick = () => deleteItem(type, index);
-        }
-        const listName = type === 'expense' ? 'fixedExpenses' : type + 's';
-        const data = state[listName][index];
-        for (const key in data) {
-            const input = form.elements[key];
-            if (input) {
-                if (input.type === 'radio' && form.elements['type']) {
-                    form.elements['type'].value = data[key];
-                } else {
-                    input.value = data[key];
+    if (index !== null && index >= 0) {
+        if (delBtn) { delBtn.style.display = 'block'; delBtn.onclick = () => deleteItem(type, index); }
+        let targetArray = type === 'expense'
+            ? state.fixedExpenses
+            : (type === 'deduction' ? state.deductions : state[type + 's']);
+        const item = targetArray[index];
+        if (item) {
+            Array.from(form.elements).forEach(input => {
+                if (input.name && item[input.name] !== undefined) {
+                    if (input.type === 'radio') {
+                        input.checked = (input.value === item[input.name]);
+                    } else {
+                        input.value = item[input.name];
+                    }
                 }
-            }
+            });
         }
     } else {
-        if (deleteBtn) deleteBtn.style.display = 'none';
-        if (type === 'event' && form.elements['date']) form.elements['date'].value = '2026-01-15';
+        if (delBtn) delBtn.style.display = 'none';
+        if (type === 'event') form.elements['date'].value = state.startDate;
     }
 
     form.onsubmit = (e) => {
@@ -492,207 +655,137 @@ function openModal(type, index = null) {
     modal.showModal();
 }
 
-function closeModal(type) {
-    const modal = $(`${type}Modal`);
-    if (modal && typeof modal.close === 'function') {
-        modal.close();
-    }
-}
-
 function saveItem(type, formData) {
     const newItem = {};
-    formData.forEach((value, key) => newItem[key] = value);
+    formData.forEach((v, k) => newItem[k] = v);
 
-    if (newItem.amount) newItem.amount = parseFloat(newItem.amount) || 0;
-    if (newItem.balance) newItem.balance = parseFloat(newItem.balance) || 0;
-    if (newItem.rate) newItem.rate = parseFloat(newItem.rate) || 0;
+    if (newItem.amount !== undefined) newItem.amount = parseFloat(newItem.amount) || 0;
+    if (newItem.balance !== undefined) newItem.balance = parseFloat(newItem.balance) || 0;
+    if (newItem.rate !== undefined) newItem.rate = parseFloat(newItem.rate) || 0;
 
-    const listName = type === 'expense' ? 'fixedExpenses' : type + 's';
-    if (editingIndex !== null) state[listName][editingIndex] = newItem;
-    else state[listName].push(newItem);
+    let targetArray = type === 'expense'
+        ? state.fixedExpenses
+        : (type === 'deduction' ? state.deductions : state[type + 's']);
+
+    if (type === 'debt') {
+        if (editingIndex !== null && targetArray[editingIndex]?.id != null) {
+            newItem.id = targetArray[editingIndex].id;
+        } else {
+            newItem.id = Date.now();
+        }
+    }
+
+    if (type === 'event') {
+        if (editingIndex !== null && targetArray[editingIndex]?.id != null) {
+            newItem.id = targetArray[editingIndex].id;
+        } else {
+            newItem.id = Date.now();
+        }
+        newItem.type = newItem.type === 'expense' ? 'expense' : 'income';
+    }
+
+    if (editingIndex !== null && editingIndex >= 0) {
+        targetArray[editingIndex] = newItem;
+    } else {
+        targetArray.push(newItem);
+    }
 
     closeModal(type);
-    saveState();
-    renderAll();
+    saveAndRun();
+    renderLists();
 }
 
 function deleteItem(type, index) {
-    const listName = type === 'expense' ? 'fixedExpenses' : type + 's';
-    state[listName].splice(index, 1);
+    let targetArray = type === 'expense'
+        ? state.fixedExpenses
+        : (type === 'deduction' ? state.deductions : state[type + 's']);
+    if (index >= 0 && index < targetArray.length) {
+        targetArray.splice(index, 1);
+    }
     closeModal(type);
-    saveState();
-    renderAll();
+    saveAndRun();
+    renderLists();
 }
+
+function closeModal(type) { $(`${type}Modal`).close(); }
+
+// Profiles
+function createNewProfile() {
+    const name = prompt("Nombre del Perfil:");
+    if (!name) return;
+    const newId = 'p_' + Date.now();
+    profiles.push({ id: newId, name, data: normalizeState(defaultData) });
+    switchProfile(newId);
+}
+function renameProfile() {
+    const p = profiles.find(x => x.id === currentProfileId);
+    const name = prompt("Nuevo nombre:", p.name);
+    if (name) { p.name = name; saveAll(); initUI(); }
+}
+function deleteCurrentProfile() {
+    if (profiles.length < 2) return alert("Debe quedar al menos 1 perfil.");
+    if (!confirm("¿Borrar perfil?")) return;
+    profiles = profiles.filter(p => p.id !== currentProfileId);
+    switchProfile(profiles[0].id);
+}
+function exportCurrentProfile() {
+    const p = profiles.find(x => x.id === currentProfileId);
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(p));
+    const dlAnchorElem = document.createElement('a');
+    dlAnchorElem.setAttribute("href", dataStr);
+    dlAnchorElem.setAttribute("download", `freedom_${p.name}.json`);
+    dlAnchorElem.click();
+}
+$('profileImportInput').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+        try {
+            const json = JSON.parse(ev.target.result);
+            if (json.data && json.name) {
+                json.id = 'p_' + Date.now();
+                json.data = normalizeState(json.data);
+                profiles.push(json);
+                switchProfile(json.id);
+            } else alert("Formato inválido");
+        } catch (err) { alert("Error al leer archivo"); }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+});
 
 function resetToDefaults() {
-    if (confirm("¿Reiniciar este perfil a los valores originales?")) {
-        state = normalizeImportedState(defaultData);
-        persistProfiles();
-
-        $('grossIncome').value = state.grossIncome || 0;
-        $('discretionary').value = state.discretionary || 0;
-        $('strategySelect').value = state.strategy || 'snowball';
-
-        renderAll();
-        runSimulation();
-    }
+    if (!confirm("¿Restaurar datos a la configuración inicial?")) return;
+    state = normalizeState(defaultData);
+    state.startDate = new Date().toISOString().split('T')[0];
+    saveAndRun();
+    initUI();
 }
 
-// --- MOTOR DE SIMULACIÓN ---
+// Helpers
+function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
-function runSimulation() {
-    const tbody = $('simTable').querySelector('tbody');
-    tbody.innerHTML = '';
-
-    let currentDebts = JSON.parse(JSON.stringify(state.debts));
-    let currentDate = new Date('2025-12-15T00:00:00');
-    let iteration = 0;
-    const maxIterations = 90;
-
-    let totalInterestPaid = 0;
-    let totalDebt = currentDebts.reduce((s, d) => s + d.balance, 0);
-
-    // Estrategia activa
-    let tempDebts = [...currentDebts];
-    if (state.strategy === 'snowball') tempDebts.sort((a, b) => a.balance - b.balance);
-    else tempDebts.sort((a, b) => b.rate - a.rate);
-    
-    const targetEl = $('currentTargetName');
-    if (targetEl) {
-        if (tempDebts.length > 0 && tempDebts[0].balance > 0) {
-            targetEl.innerText = `${tempDebts[0].name}`;
-        } else {
-            targetEl.innerText = "Libre";
-        }
+function formatDateShort(dateObj) {
+    if (typeof dateObj === 'string') {
+        dateObj = dateFromYMD(dateObj);
     }
-
-    // Loop
-    while (totalDebt > 100 && iteration < maxIterations) {
-        iteration++;
-
-        const currentYear = currentDate.getFullYear();
-        const currentMonth = currentDate.getMonth();
-        const currentDay = currentDate.getDate();
-        const isFirstQ = currentDay <= 15;
-        const displayDate = currentDate.toLocaleDateString('es-MX', { day: 'numeric', month: 'short', year: '2-digit' });
-
-        let income = state.computedNet;
-        let expenses = state.computedFixed + state.discretionary;
-        let notes = [];
-
-        // Eventos por quincena
-        state.events.forEach(ev => {
-            const d = new Date(ev.date + 'T00:00:00');
-            if (d.getFullYear() === currentYear && d.getMonth() === currentMonth) {
-                const evIsFirstQ = d.getDate() <= 15;
-                if (isFirstQ === evIsFirstQ) {
-                    if (ev.type === 'income') {
-                        income += ev.amount;
-                        notes.push(`+${ev.name}`);
-                    } else {
-                        expenses += ev.amount;
-                        notes.push(`-${ev.name}`);
-                    }
-                }
-            }
-        });
-
-        let cashAvailable = income - expenses;
-        let periodInterest = 0;
-        let paymentsLog = [];
-
-        // A. Intereses
-        currentDebts.forEach(d => {
-            if (d.balance > 10) {
-                const periodicRate = (d.rate / 100) / 24;
-                const interest = d.balance * periodicRate;
-                const iva = interest * 0.16;
-                const charge = interest + iva;
-                
-                d.balance += charge;
-                periodInterest += charge;
-                totalInterestPaid += charge;
-            }
-        });
-
-        // B. Pagos mínimos
-        let remainingCash = cashAvailable;
-        currentDebts.forEach(d => {
-            if (d.balance <= 0) return;
-            const periodicRate = (d.rate / 100) / 24;
-            const financeCharge = d.balance * periodicRate * 1.16;
-            const capitalPay = d.balance * 0.015;
-            const minPayment = financeCharge + capitalPay;
-
-            let payAmount = Math.min(minPayment, remainingCash);
-            
-            if (payAmount > 0) {
-                d.balance -= payAmount;
-                remainingCash -= payAmount;
-            }
-        });
-
-        // C. Estrategia (excedente)
-        if (state.strategy === 'snowball') currentDebts.sort((a, b) => a.balance - b.balance);
-        else currentDebts.sort((a, b) => b.rate - a.rate);
-
-        if (remainingCash > 10) {
-            currentDebts.forEach(d => {
-                if (remainingCash <= 0 || d.balance <= 5) return;
-                
-                let payAmount = Math.min(d.balance, remainingCash);
-                d.balance -= payAmount;
-                remainingCash -= payAmount;
-                
-                paymentsLog.push(`<b>${d.name}</b>: ${formatMoney(payAmount)} (Extra)`);
-            });
-        } else {
-            if (cashAvailable > 0) paymentsLog.push("Solo Mínimos");
-            else paymentsLog.push("<span class='negative'>Déficit</span>");
-        }
-
-        totalDebt = currentDebts.reduce((s, d) => s + d.balance, 0);
-
-        // Render fila
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-            <td>${iteration}</td>
-            <td class="mono">${displayDate}</td>
-            <td class="mono ${cashAvailable < 0 ? 'negative' : 'positive'}">${formatMoney(cashAvailable)}</td>
-            <td style="color:var(--danger); font-size:0.85rem">-${formatMoney(periodInterest)}</td>
-            <td style="font-size:0.8rem">${paymentsLog.length ? paymentsLog.join('<br>') : '-'}</td>
-            <td class="mono" style="font-weight:bold">${formatMoney(totalDebt)}</td>
-            <td style="font-size:0.75rem; color:#94a3b8">${notes.join(', ')}</td>
-        `;
-        tbody.appendChild(tr);
-
-        // Avanzar quincena
-        if (isFirstQ) currentDate = new Date(currentYear, currentMonth + 1, 0);
-        else currentDate = new Date(currentYear, currentMonth + 1, 15);
-    }
-
-    $('totalInterestPaid').innerText = formatMoney(totalInterestPaid);
-    const freedomDateEl = $('freedomDate');
-    const timeEl = $('freedomTimeLeft');
-    
-    if (totalDebt <= 150) {
-        const lastRow = tbody.lastElementChild;
-        freedomDateEl.innerText = lastRow ? lastRow.children[1].innerText : "Hoy";
-        freedomDateEl.style.color = 'var(--success)';
-        timeEl.innerText = `${iteration} quincenas`;
-    } else {
-        freedomDateEl.innerText = "Deuda Infinita";
-        freedomDateEl.style.color = 'var(--danger)';
-        timeEl.innerText = "Interés > Pago";
-    }
+    return dateObj.toLocaleDateString('es-MX', {
+        day: 'numeric',
+        month: 'short',
+        year: '2-digit'
+    });
 }
 
-// Global exports
+// Hooks
+window.onload = loadApp;
 window.openModal = openModal;
 window.closeModal = closeModal;
-window.saveItem = saveItem;
 window.deleteItem = deleteItem;
 window.resetToDefaults = resetToDefaults;
-
-// Start
-window.onload = init;
+window.createNewProfile = createNewProfile;
+window.renameProfile = renameProfile;
+window.deleteCurrentProfile = deleteCurrentProfile;
+window.exportCurrentProfile = exportCurrentProfile;
+window.openChartModal = openChartModal;
+window.closeChartModal = closeChartModal;
