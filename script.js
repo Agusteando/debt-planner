@@ -336,6 +336,9 @@ function runSimulation() {
         ? new Date(startParts.year, startParts.month - 1, startParts.day)
         : new Date();
 
+    const simStartDate = dateFromYMD(state.startDate);
+    let prevPeriodEnd = null; // para asignar eventos por rango (prevEnd, currentEnd]
+
     let iteration = 0;
     const MAX_ITERS = 120;
     let totalInterestPaid = 0;
@@ -365,26 +368,31 @@ function runSimulation() {
         let periodExpense = baseFixed + state.discretionary;
         let eventLog = [];
 
-        // Events by month + quincena
+        const periodEnd = currentDate;
+
+        // --- EVENTOS: rango inteligente (prevEnd, periodEnd] ---
         state.events.forEach(ev => {
             if (!ev.date) return;
-            const p = parseYMD(ev.date);
-            if (!p) return;
-            const evYear = p.year;
-            const evMonth = p.month - 1;
-            const evDay = p.day;
+            const evDate = dateFromYMD(ev.date);
+            if (!evDate) return;
 
-            if (evYear === cYear && evMonth === cMonth) {
-                const evIsFirst = evDay <= 15;
-                if (evIsFirst === isFirstQ) {
-                    if (ev.type === 'income') {
-                        periodIncome += ev.amount;
-                        eventLog.push(`+${ev.name}`);
-                    } else {
-                        periodExpense += ev.amount;
-                        eventLog.push(`-${ev.name}`);
-                    }
-                }
+            let include = false;
+            if (prevPeriodEnd) {
+                // periodos después del primero
+                if (evDate > prevPeriodEnd && evDate <= periodEnd) include = true;
+            } else {
+                // primer periodo: desde startDate hasta periodEnd
+                if (evDate >= simStartDate && evDate <= periodEnd) include = true;
+            }
+
+            if (!include) return;
+
+            if (ev.type === 'income') {
+                periodIncome += ev.amount;
+                eventLog.push(`+${ev.name}`);
+            } else {
+                periodExpense += ev.amount;
+                eventLog.push(`-${ev.name}`);
             }
         });
 
@@ -448,6 +456,8 @@ function runSimulation() {
                     creditLimit: debt.creditLimit || null
                 }
             });
+
+            totalInterestPaid += totalCharge;
         });
 
         // Aplicar mínimos con el cash disponible
@@ -580,6 +590,9 @@ function runSimulation() {
             <td style="font-size:0.75rem">${rowData.notes}</td>
         `;
         tbody.appendChild(tr);
+
+        // actualizar límite inferior para eventos del siguiente periodo
+        prevPeriodEnd = new Date(periodEnd);
 
         // Avanzar a la siguiente quincena (fecha de periodo)
         if (isFirstQ) {
