@@ -1,3 +1,4 @@
+
 :root {
   --bg-app: #0f172a;
   --bg-sidebar: #1e293b;
@@ -33,13 +34,20 @@ body {
   display: flex;
   min-height: 100vh; /* app spans at least full viewport */
 }
+
 .sidebar {
   width: 360px;
   background-color: var(--bg-sidebar);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
+  /* make sidebar column fixed to viewport and independently scrollable */
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  max-height: 100vh;
 }
+
 .main-content {
   flex: 1;
   display: flex;
@@ -85,8 +93,8 @@ body {
 /* SIDEBAR COMPONENTS */
 .scrollable-content {
   flex: 1;
-  /* let the whole page scroll; avoid nested scroll traps */
-  overflow-y: visible;
+  /* sidebar gets its own vertical scroll */
+  overflow-y: auto;
   padding: 20px;
 }
 .section-group {
@@ -220,6 +228,10 @@ input[type='date'] {
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
   padding: 16px 24px;
+  /* make the toolbar sticky at the top of the main column */
+  position: sticky;
+  top: 0;
+  z-index: 30;
 }
 
 .profile-manager {
